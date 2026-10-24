@@ -6,6 +6,14 @@
 - `scripts/install.sh` installs the plugin into `~/.claude/skills/oracle`, for a cloud environment's setup script.
 - The README covers giving cloud sessions the oracle, through your claude.ai account or an environment's setup script.
 
+Fixes to the read-only guard:
+
+- The oracle may resume only the subagents it started, and a subagent the main conversation resumes stays guarded if the oracle started it.
+- A subagent whose oracle has left the agent list (after a reload) is traced through the Agent call that started it; one no transcript accounts for stays guarded.
+- An extra command split by a line continuation (`$\` then a newline, then `(`) is refused as command substitution.
+- An `ORACLE_EXTRA_COMMANDS` with no usable command keeps the `/config` ones, with a warning; an empty one clears them.
+- The status line drops a consultation whose oracle stopped without an answer, and a reload restarts it on the new configuration.
+
 ## 1.0.0
 
 First release.

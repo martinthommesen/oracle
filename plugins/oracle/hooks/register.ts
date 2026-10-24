@@ -5,7 +5,7 @@
 // Without this module (hooks modules switched off, an older Claude Code) the
 // plugin still provides agents/oracle.md, the same prompt on fixed defaults.
 
-import type { EngineInterface, Register, Timer } from 'claude-code'
+import type { AgentInfo, EngineInterface, Register, Timer } from 'claude-code'
 
 import { describeConfig, readConfig } from './config.ts'
 import { AGENT_NAME, AGENT_TYPE, ALL_FEATURES, READ_THREAD_NAME, READ_THREAD_TOOL, oracleDescription, oracleInstructions, oracleTools } from './prompts.ts'
@@ -42,6 +42,7 @@ let refreshing: Promise<void> | undefined
 /** Running oracle consultations: agent id to start time. */
 const consulting = new Map<string, number>()
 let ticker: Timer | undefined
+let ticks = 0
 
 function remember(id: string, type: string, parent: string | undefined): void {
   const isOracle = type === AGENT_TYPE
@@ -50,21 +51,65 @@ function remember(id: string, type: string, parent: string | undefined): void {
   unlisted.delete(id)
 }
 
+type Started = { type: string; parentId: string | undefined }
+
+/**
+ * Finds how the agents `missing` were started, from the Agent calls in the
+ * session's transcripts: the main conversation's and each known agent's, a
+ * found agent's own transcript included, since it may have started another.
+ */
+async function findSpawns($: EngineInterface, missing: ReadonlySet<string>, known: readonly string[]): Promise<Map<string, Started>> {
+  const found = new Map<string, Started>()
+  const read = new Set<string>()
+  let pending: (string | undefined)[] = [undefined, ...known]
+  while (pending.length > 0 && found.size < missing.size) {
+    const next: string[] = []
+    for (const spawner of pending) {
+      const key = spawner ?? ''
+      if (read.has(key)) continue
+      read.add(key)
+      const rows = spawner === undefined ? await $.session.messages() : await $.session.messages({ agentId: spawner })
+      if ('deny' in rows) continue
+      for (const use of rows.flatMap(row => row.toolUses)) {
+        if (use.tool !== 'Agent' || use.agentId === undefined || !missing.has(use.agentId) || found.has(use.agentId)) continue
+        const type = typeof use.input.subagent_type === 'string' ? use.input.subagent_type : 'general-purpose'
+        found.set(use.agentId, { type, parentId: spawner })
+        next.push(use.agentId)
+      }
+    }
+    pending = next
+  }
+  return found
+}
+
+/** Classifies the listed agents, parents before children. */
+async function classify($: EngineInterface, list: readonly AgentInfo[]): Promise<void> {
+  const started = new Map<string, Started>(list.map(info => [info.id, { type: info.type, parentId: info.parentId }]))
+  // A parent the list no longer holds (a finished agent) is found by the call that started it.
+  const missing = new Set(list.flatMap(info => (info.parentId !== undefined && !started.has(info.parentId) && !agents.has(info.parentId) ? [info.parentId] : [])))
+  if (missing.size > 0) {
+    for (const [id, how] of await findSpawns($, missing, [...started.keys()])) started.set(id, how)
+  }
+  const visit = (id: string, seen: Set<string>): void => {
+    if (agents.has(id) || seen.has(id)) return
+    seen.add(id)
+    const how = started.get(id)
+    if (how === undefined) {
+      // Started by an agent no transcript accounts for: it may be an oracle, so its subagents stay guarded.
+      agents.set(id, { isOracle: false, inFamily: true, parent: undefined })
+      return
+    }
+    if (how.parentId !== undefined) visit(how.parentId, seen)
+    remember(id, how.type, how.parentId)
+  }
+  for (const info of list) visit(info.id, new Set())
+}
+
 /** Fills in the agents started before this module loaded; concurrent callers share one listing. */
 function refresh($: EngineInterface): Promise<void> {
   refreshing ??= $.agent
     .list()
-    .then(list => {
-      const byId = new Map(list.map(info => [info.id, info]))
-      const visit = (id: string, seen: Set<string>): void => {
-        const info = byId.get(id)
-        if (info === undefined || agents.has(id) || seen.has(id)) return
-        seen.add(id)
-        if (info.parentId !== undefined) visit(info.parentId, seen) // a parent is classified before its children
-        remember(id, info.type, info.parentId)
-      }
-      for (const info of list) visit(info.id, new Set())
-    })
+    .then(list => classify($, list))
     .finally(() => {
       refreshing = undefined
     })
@@ -125,7 +170,23 @@ function showStatus($: EngineInterface, label: string): void {
   }
   const who = consulting.size === 1 ? 'oracle' : `${consulting.size} oracles`
   $.ui.status(`🔮 ${who} thinking · ${label} · ${formatDuration(Date.now() - Math.min(...consulting.values()))}`)
-  ticker ??= $.clock.every(1000, () => showStatus($, label))
+  ticker ??= $.clock.every(1000, () => tick($, label))
+}
+
+/** Redraws the status each second, and every fifteenth drops consultations whose oracle no longer runs. */
+function tick($: EngineInterface, label: string): void {
+  ticks += 1
+  if (ticks % 15 === 0) void dropFinished($, label).catch(() => showStatus($, label))
+  else showStatus($, label)
+}
+
+/** A safety net for an oracle whose end no turn.complete reported. */
+async function dropFinished($: EngineInterface, label: string): Promise<void> {
+  const running = new Set(
+    (await $.agent.list()).filter(info => info.status === 'pending' || info.status === 'running' || info.status === 'waiting').map(info => info.id),
+  )
+  for (const id of consulting.keys()) if (!running.has(id)) consulting.delete(id)
+  showStatus($, label)
 }
 
 export const register: Register = (on, options) => {
@@ -143,6 +204,9 @@ export const register: Register = (on, options) => {
     const read = readConfig(options, { model, effort, extraCommands })
     config = read.config
     label = describeConfig(config)
+    // A running ticker captured the old label: restart it on the new one.
+    ticker?.cancel()
+    ticker = undefined
     showStatus($, label) // a reload starts with no consultation in view
     for (const warning of read.warnings) $.ui.log(`oracle: ${warning}`)
     const [tool, agent] = await Promise.allSettled([
@@ -191,13 +255,17 @@ export const register: Register = (on, options) => {
   // parameter would otherwise let the calling model pick a weaker one.
   on('agent.spawn', async ($, e, next) => {
     const parent = e.parentAgentId === undefined ? undefined : await lookUp($, e.parentAgentId)
-    if (parent?.inFamily === true && e.resume === undefined && !DELEGATES.has(e.subagentType)) {
-      return { deny: DELEGATION_REFUSAL }
+    if (parent?.inFamily === true) {
+      if (e.resume === undefined && !DELEGATES.has(e.subagentType)) return { deny: DELEGATION_REFUSAL }
+      if (e.resume !== undefined && (await lookUp($, e.resume.agentId))?.inFamily !== true) {
+        return { deny: 'oracle (read-only): the oracle may resume only the subagents it started.' }
+      }
     }
     const isNewOracle = e.subagentType === AGENT_TYPE && e.resume === undefined && e.workflow === undefined
     const started = await next(isNewOracle ? { ...e, model: undefined } : e)
     if (started.agentId !== undefined) {
-      remember(started.agentId, e.subagentType, e.parentAgentId)
+      // A resumed agent keeps the parent that started it; only a new one is classified here.
+      if (e.resume === undefined || !agents.has(started.agentId)) remember(started.agentId, e.subagentType, e.parentAgentId)
       if (e.subagentType === AGENT_TYPE) {
         $.ui.log(`oracle: consulting on ${started.model}`, { to: 'debug' })
         consulting.set(started.agentId, Date.now())

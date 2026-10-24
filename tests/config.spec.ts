@@ -58,6 +58,12 @@ describe('readConfig', () => {
     assert.equal(warnings.length, 2)
   })
 
+  it('keeps the option and warns when ORACLE_EXTRA_COMMANDS has no usable prefix', () => {
+    const { config, warnings } = readConfig({ extra_commands: 'make -n' }, { extraCommands: 'make -n $(rm -rf /)' })
+    assert.deepEqual(config.extraCommands, [['make', '-n']])
+    assert.equal(warnings.length, 1)
+  })
+
   it('describes itself for the status line', () => {
     assert.equal(describeConfig(readConfig({ model: 'opus', effort: 'xhigh' }).config), 'opus · xhigh')
     assert.equal(describeConfig(readConfig({ model: 'fable', effort: 'auto' }).config), 'fable')

@@ -61,13 +61,20 @@ export function readConfig(
   if (EFFORTS.includes(effortVariable)) effort = effortVariable
   else if (effortVariable !== '') warnings.push(`ORACLE_EFFORT "${effortVariable}" is not one of ${EFFORTS.join(', ')}; the oracle uses ${effort || 'auto'}`)
 
-  const extraCommands = environment.extraCommands ?? options.extra_commands
+  // An empty variable clears the option's commands; one with no usable command keeps them.
+  let extraCommands = parseExtraPrefixes(text(options.extra_commands))
+  if (environment.extraCommands !== undefined) {
+    const commandsVariable = text(environment.extraCommands)
+    const parsed = parseExtraPrefixes(commandsVariable)
+    if (commandsVariable === '' || parsed.length > 0) extraCommands = parsed
+    else warnings.push(`ORACLE_EXTRA_COMMANDS "${commandsVariable}" names no usable command prefix; the oracle keeps the /config ones`)
+  }
 
   return {
     config: {
       model,
       effort: effort === '' || effort === 'auto' ? undefined : effort,
-      extraCommands: parseExtraPrefixes(text(extraCommands)),
+      extraCommands,
     },
     warnings,
   }

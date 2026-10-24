@@ -17,6 +17,16 @@ function refuse(reason: string): never {
 const WORD_BREAK = new Set([' ', '\t', '\n', ';', '&', '|', '<', '>', '(', ')'])
 const DESCRIPTOR = /^(\d+|-)$/
 
+/**
+ * The character at or after `i` once line continuations (backslash-newline) are
+ * skipped: bash removes them before it reads anything else, even inside double
+ * quotes, so `$\<newline>(` is still command substitution.
+ */
+function charAfterContinuations(src: string, i: number): string | undefined {
+  while (src[i] === '\\' && src[i + 1] === '\n') i += 2
+  return src[i]
+}
+
 /** Reads one shell word starting at `start`; returns its text with quotes removed. */
 function readWord(src: string, start: number): { text: string; end: number } {
   let text = ''
@@ -50,7 +60,7 @@ function readWord(src: string, start: number): { text: string; end: number } {
           i += 1
           break
         }
-        if (d === '`' || (d === '$' && src[i + 1] === '(')) refuse('command substitution')
+        if (d === '`' || (d === '$' && charAfterContinuations(src, i + 1) === '(')) refuse('command substitution')
         if (d === '\\' && i + 1 < src.length && '$`"\\\n'.includes(src[i + 1]!)) {
           if (src[i + 1] !== '\n') text += src[i + 1]
           i += 2
@@ -63,8 +73,9 @@ function readWord(src: string, start: number): { text: string; end: number } {
     }
     if (c === '`') refuse('command substitution')
     if (c === '$') {
-      if (src[i + 1] === '(') refuse('command substitution')
-      if (src[i + 1] === "'") refuse("ANSI-C quoting ($'...')")
+      const after = charAfterContinuations(src, i + 1)
+      if (after === '(') refuse('command substitution')
+      if (after === "'") refuse("ANSI-C quoting ($'...')")
     }
     text += c
     i += 1

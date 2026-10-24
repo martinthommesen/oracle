@@ -1,9 +1,9 @@
 // Hook-level tests, run by `claude plugin test plugins/oracle`. The hooks a
 // test registers with `on` sit beneath the plugin and stand for the engine.
 
-import type { AgentSpawnInput, On, ToolCheckResult } from 'claude-code'
+import type { AgentSpawnInput, AgentStatus, On, SessionMessage, ToolCheckResult } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
-import type { Engine } from 'claude-code/testing'
+import type { Engine, MockClock } from 'claude-code/testing'
 
 type Spec = { name: string; model?: string; effort?: string | number; tools?: readonly string[]; prompt: string; description: string }
 type Recorded = {
@@ -12,8 +12,9 @@ type Recorded = {
   statuses: (string | undefined)[]
   toasts: string[]
   spawnModels: (string | undefined)[]
+  clock: MockClock
 }
-type Listed = { id: string; type: string; parentId?: string }
+type Listed = { id: string; type: string; parentId?: string; status?: AgentStatus }
 
 /**
  * Stands in for the engine: records registrations, starts every spawn under
@@ -24,8 +25,7 @@ function engine(
   on: On,
   { list = [], verdict = { decision: 'allow' }, env = {} }: { list?: Listed[]; verdict?: ToolCheckResult; env?: Record<string, string> } = {},
 ): Recorded {
-  const recorded: Recorded = { agents: [], tools: [], statuses: [], toasts: [], spawnModels: [] }
-  mock.clock(on)
+  const recorded: Recorded = { agents: [], tools: [], statuses: [], toasts: [], spawnModels: [], clock: mock.clock(on) }
   mock.env(on, env)
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('agent.register', (_, e) => {
@@ -36,7 +36,7 @@ function engine(
     recorded.tools.push(e)
     return { value: { tool: `mcp__oracle__${e.name}` } }
   })
-  on('agent.list', () => ({ value: list.map(agent => ({ ...agent, description: '', status: 'running' as const })) }))
+  on('agent.list', () => ({ value: list.map(agent => ({ description: '', status: 'running' as const, ...agent })) }))
   on('agent.spawn', (_, e) => {
     recorded.spawnModels.push(e.model)
     return { model: e.model ?? 'resolved-model', agentId: e.description }
@@ -73,6 +73,15 @@ function spawn(id: string, subagentType: string, parentAgentId?: string): AgentS
 
 async function start($: Engine): Promise<void> {
   await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+}
+
+/** An assistant row whose Agent call started `agentId` as `subagentType`. */
+function started(agentId: string, subagentType: string): SessionMessage {
+  return {
+    role: 'assistant',
+    text: '',
+    toolUses: [{ tool_use_id: `toolu_${agentId}`, tool: 'Agent', input: { subagent_type: subagentType, description: agentId, prompt: 'task' }, agentId }],
+  }
 }
 
 /** Starts the session with an oracle o1 and, under it, an Explore subagent e1. */
@@ -198,6 +207,18 @@ describe('tools the oracle may call', () => {
     expect((await $.agent.spawn(spawn('p1', 'Plan', 'o1'))).deny).toBe(undefined)
     expect((await $.agent.spawn(spawn('g3', 'general-purpose', 'w1'))).deny).toBe(undefined)
   })
+
+  test('lets the oracle resume only its own subagents, which stay guarded', async ($, on) => {
+    engine(on)
+    await withOracle($)
+    await $.agent.spawn(spawn('x1', 'Explore'))
+
+    expect((await $.agent.spawn({ ...spawn('x1', 'Explore', 'o1'), resume: { agentId: 'x1' } })).deny).toBeDefined()
+    expect((await $.agent.spawn({ ...spawn('e1', 'Explore', 'o1'), resume: { agentId: 'e1' } })).deny).toBe(undefined)
+    // The main conversation resuming the oracle's subagent leaves it the oracle's.
+    expect((await $.agent.spawn({ ...spawn('e1', 'Explore'), resume: { agentId: 'e1' } })).deny).toBe(undefined)
+    expect((await $.tool.call({ tool: 'Write', file_path: '/repo/x', content: 'x', agentId: 'e1' })).deny).toBeDefined()
+  })
 })
 
 describe('shell commands', () => {
@@ -260,6 +281,23 @@ describe('shell commands', () => {
     expect((await $.tool.check({ tool: 'Bash', input: { command: 'git commit -m x' }, agentId: 'e9' })).decision).toBe('deny')
     expect((await $.tool.call({ tool: 'Edit', file_path: '/repo/a.ts', old_string: 'a', new_string: 'b', agentId: 'e9' })).deny).toBeDefined()
   })
+
+  test('traces a subagent whose oracle has left the agent list, by the call that started it', async ($, on) => {
+    engine(on, { list: [{ id: 'e9', type: 'Explore', parentId: 'o9' }, { id: 'e8', type: 'Explore', parentId: 'g8' }] })
+    on('session.messages', (_, e) => ({ value: e.agentId === undefined ? [started('o9', 'oracle:oracle'), started('g8', 'general-purpose')] : [] }))
+    await start($)
+
+    expect((await $.tool.check({ tool: 'Bash', input: { command: 'git commit -m x' }, agentId: 'e9' })).decision).toBe('deny')
+    expect((await $.tool.check({ tool: 'Bash', input: { command: 'git commit -m x' }, agentId: 'e8' })).decision).toBe('allow')
+  })
+
+  test('keeps a subagent guarded when no transcript says who started it', async ($, on) => {
+    engine(on, { list: [{ id: 'e9', type: 'Explore', parentId: 'gone' }] })
+    on('session.messages', () => ({ value: [] }))
+    await start($)
+
+    expect((await $.tool.check({ tool: 'Bash', input: { command: 'git commit -m x' }, agentId: 'e9' })).decision).toBe('deny')
+  })
 })
 
 describe('read_thread', () => {
@@ -294,5 +332,19 @@ describe('status', () => {
     await $.turn.complete({ answer: 'No blockers.', durationMs: 125_000, isAborted: false, turnId: 't', agentId: 'o1', reason: 'answer' })
     expect(recorded.statuses.at(-1)).toBe(undefined)
     expect(recorded.toasts.at(-1)).toContain('answered after 2m 05s')
+  })
+
+  test('clears a consultation whose oracle stopped without an answer', async ($, on) => {
+    const list: Listed[] = [{ id: 'o1', type: 'oracle:oracle' }]
+    const recorded = engine(on, { list })
+    await start($)
+    await $.agent.spawn(spawn('o1', 'oracle:oracle'))
+
+    await recorded.clock.advance(15_000)
+    expect(recorded.statuses.at(-1)).toContain('oracle thinking')
+
+    list[0] = { id: 'o1', type: 'oracle:oracle', status: 'killed' }
+    await recorded.clock.advance(15_000)
+    expect(recorded.statuses.at(-1)).toBe(undefined)
   })
 })
