@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "oracle",
+  "owner": {
+    "name": "Martin Thommesen",
+    "url": "https://github.com/martinthommesen"
+  },
+  "metadata": {
+    "description": "The oracle: a read-only expert advisor for Claude Code."
+  },
+  "plugins": [
+    {
+      "name": "oracle",
+      "source": "./plugins/oracle",
+      "description": "A read-only expert advisor subagent on a stronger reasoning model, for user-requested reviews and unresolved high-impact judgment calls. Model and effort are configurable.",
+      "category": "development"
+    }
+  ]
+}

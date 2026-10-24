@@ -1,0 +1,45 @@
+# GitHub Actions workflow for this repository. To enable it, move it into place:
+#   git mv ci/github-actions.yml .github/workflows/ci.yml
+
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Fallback agent file matches the prompts
+        run: npm run check:agent
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Install Claude Code
+        run: npm install --global @anthropic-ai/claude-code@stable
+
+      - name: Validate the marketplace and the plugin
+        run: |
+          claude plugin validate .
+          claude plugin validate plugins/oracle --strict
+
+      - name: Hook tests
+        run: claude plugin test plugins/oracle
