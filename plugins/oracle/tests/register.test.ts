@@ -1,7 +1,7 @@
 // Hook-level tests, run by `claude plugin test plugins/oracle`. The hooks a
 // test registers with `on` sit beneath the plugin and stand for the engine.
 
-import type { AgentSpawnInput, On, ToolCheckResult } from 'claude-code'
+import type { AgentSpawnInput, On, SessionMessage, ToolCheckResult } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
@@ -20,9 +20,13 @@ type Listed = { id: string; type: string; parentId?: string }
  * its `description` as the agent id, answers every tool call with "ran" and
  * every permission check with `verdict`.
  */
-function engine(on: On, { list = [], verdict = { decision: 'allow' } }: { list?: Listed[]; verdict?: ToolCheckResult } = {}): Recorded {
+function engine(
+  on: On,
+  { list = [], verdict = { decision: 'allow' }, env = {} }: { list?: Listed[]; verdict?: ToolCheckResult; env?: Record<string, string> } = {},
+): Recorded {
   const recorded: Recorded = { agents: [], tools: [], statuses: [], toasts: [], spawnModels: [] }
   mock.clock(on)
+  mock.env(on, env)
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('agent.register', (_, e) => {
     recorded.agents.push(e)
@@ -71,6 +75,15 @@ async function start($: Engine): Promise<void> {
   await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
 }
 
+/** An assistant row whose Agent call started `agentId` as `subagentType`. */
+function started(agentId: string, subagentType: string): SessionMessage {
+  return {
+    role: 'assistant',
+    text: '',
+    toolUses: [{ tool_use_id: `toolu_${agentId}`, tool: 'Agent', input: { subagent_type: subagentType, description: agentId, prompt: 'task' }, agentId }],
+  }
+}
+
 /** Starts the session with an oracle o1 and, under it, an Explore subagent e1. */
 async function withOracle($: Engine): Promise<void> {
   await start($)
@@ -108,6 +121,17 @@ describe('registration', () => {
 
     expect(recorded.agents[0]?.model).toBe('claude-opus-5-5[1m]')
     expect(recorded.agents[0]?.effort).toBe(undefined)
+  })
+
+  test('environment variables override the /config rows', { options: { model: 'sonnet', effort: 'high' } }, async ($, on) => {
+    const recorded = engine(on, { env: { ORACLE_MODEL: 'fable', ORACLE_EFFORT: 'max', ORACLE_EXTRA_COMMANDS: 'make -n' } })
+    await start($)
+
+    expect(recorded.agents[0]?.model).toBe('fable')
+    expect(recorded.agents[0]?.effort).toBe('max')
+    await $.agent.spawn(spawn('o1', 'oracle:oracle'))
+    expect((await $.tool.check({ tool: 'Bash', input: { command: 'make -n test' }, agentId: 'o1' })).decision).toBe('allow')
+    expect(recorded.statuses.at(-1)).toContain('fable · max')
   })
 
   test('an unusable model name falls back to opus', { options: { model: 'not a model' } }, async ($, on) => {
@@ -183,6 +207,18 @@ describe('tools the oracle may call', () => {
     expect((await $.agent.spawn(spawn('p1', 'Plan', 'o1'))).deny).toBe(undefined)
     expect((await $.agent.spawn(spawn('g3', 'general-purpose', 'w1'))).deny).toBe(undefined)
   })
+
+  test('lets the oracle resume only its own subagents, which stay guarded', async ($, on) => {
+    engine(on)
+    await withOracle($)
+    await $.agent.spawn(spawn('x1', 'Explore'))
+
+    expect((await $.agent.spawn({ ...spawn('x1', 'Explore', 'o1'), resume: { agentId: 'x1' } })).deny).toBeDefined()
+    expect((await $.agent.spawn({ ...spawn('e1', 'Explore', 'o1'), resume: { agentId: 'e1' } })).deny).toBe(undefined)
+    // The main conversation resuming the oracle's subagent leaves it the oracle's.
+    expect((await $.agent.spawn({ ...spawn('e1', 'Explore'), resume: { agentId: 'e1' } })).deny).toBe(undefined)
+    expect((await $.tool.call({ tool: 'Write', file_path: '/repo/x', content: 'x', agentId: 'e1' })).deny).toBeDefined()
+  })
 })
 
 describe('shell commands', () => {
@@ -244,6 +280,23 @@ describe('shell commands', () => {
 
     expect((await $.tool.check({ tool: 'Bash', input: { command: 'git commit -m x' }, agentId: 'e9' })).decision).toBe('deny')
     expect((await $.tool.call({ tool: 'Edit', file_path: '/repo/a.ts', old_string: 'a', new_string: 'b', agentId: 'e9' })).deny).toBeDefined()
+  })
+
+  test('traces a subagent whose oracle has left the agent list, by the call that started it', async ($, on) => {
+    engine(on, { list: [{ id: 'e9', type: 'Explore', parentId: 'o9' }, { id: 'e8', type: 'Explore', parentId: 'g8' }] })
+    on('session.messages', (_, e) => ({ value: e.agentId === undefined ? [started('o9', 'oracle:oracle'), started('g8', 'general-purpose')] : [] }))
+    await start($)
+
+    expect((await $.tool.check({ tool: 'Bash', input: { command: 'git commit -m x' }, agentId: 'e9' })).decision).toBe('deny')
+    expect((await $.tool.check({ tool: 'Bash', input: { command: 'git commit -m x' }, agentId: 'e8' })).decision).toBe('allow')
+  })
+
+  test('keeps a subagent guarded when no transcript says who started it', async ($, on) => {
+    engine(on, { list: [{ id: 'e9', type: 'Explore', parentId: 'gone' }] })
+    on('session.messages', () => ({ value: [] }))
+    await start($)
+
+    expect((await $.tool.check({ tool: 'Bash', input: { command: 'git commit -m x' }, agentId: 'e9' })).decision).toBe('deny')
   })
 })
 

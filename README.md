@@ -12,7 +12,7 @@ It runs the prompts of Amp's Oracle, adapted to Claude Code, and you choose the 
 - **Knows the conversation**: a `read_thread` tool lets it read the conversation that called it, so it can recover your original request and constraints.
 - **Follow-ups keep context**: Claude continues the same oracle with SendMessage instead of starting over.
 - **`/oracle`** to consult it yourself; a status line shows it thinking.
-- Works in the **Claude Code CLI and desktop app**, on any platform, with nothing else to install.
+- Works in the **Claude Code CLI and desktop app** on any platform, and in **cloud sessions** on the web, with nothing else to install.
 
 ## Install
 
@@ -34,6 +34,8 @@ Or add the marketplace first and install from it:
 From a shell: `claude plugin install oracle --marketplace martinthommesen/oracle`.
 
 **Desktop app:** click **+** next to the prompt box, then **Plugins**, **Add marketplace** with `martinthommesen/oracle`, then **Add plugin** for Oracle. A plugin installed from the terminal at the user scope loads in the desktop app's local sessions too.
+
+**Cloud sessions** (Claude Code on the web, `claude --cloud`, and the apps' cloud sessions) don't load plugins installed on your machine: see [Cloud sessions](#cloud-sessions).
 
 **Requirements:** Claude Code v2.1.271 or later (tested on v2.1.308 and v2.1.310). The configurable model, the read-only guard, `read_thread`, and the status line come from the plugin's hooks module (a Claude Code [mod](https://code.claude.com/docs/en/plugins/mods/overview)). Where hooks modules are switched off, the plugin falls back to a plain agent file: the same oracle prompts on Opus at `xhigh` effort, without those extras.
 
@@ -68,7 +70,63 @@ The same values in your user settings (`~/.claude/settings.json`):
 }
 ```
 
+Environment variables override all three, in any session that has them. They are how you configure the oracle in a [cloud session](#cloud-sessions), which doesn't read your `/config` options:
+
+| Variable | Overrides | Example |
+| :-- | :-- | :-- |
+| `ORACLE_MODEL` | Oracle model | `ORACLE_MODEL=fable` |
+| `ORACLE_EFFORT` | Oracle effort | `ORACLE_EFFORT=max` |
+| `ORACLE_EXTRA_COMMANDS` | Extra read-only commands | `ORACLE_EXTRA_COMMANDS=npm ls, make -n` |
+
+An unusable value is ignored with a warning in the transcript, and the `/config` value stays in force.
+
 The configured model always wins: if Claude names a model when it calls the oracle, the plugin drops it, so the oracle runs on yours. On some plans Fable bills to usage credits; see [Fable and usage credits](https://code.claude.com/docs/en/model-config#fable-and-usage-credits).
+
+## Cloud sessions
+
+A cloud session (Claude Code on the web at [claude.ai/code](https://claude.ai/code), `claude --cloud`, or a cloud session in the desktop or mobile app) runs in a fresh virtual machine. It doesn't load the plugins you installed on your own machine or the ones a repository's `.claude/settings.json` turns on, and it doesn't read your `/config` options. Give it the oracle in one of two ways, then configure it with environment variables.
+
+### Add it to your claude.ai account (recommended)
+
+Plugins on your claude.ai account sync into every Claude Code session you start signed in to that account, cloud sessions included.
+
+1. Open [**Customize > Plugins**](https://claude.ai/customize/plugins) on claude.ai or in the desktop app.
+2. Select **Add > Add marketplace** and enter `martinthommesen/oracle`.
+3. Add **Oracle** from that marketplace. To get new versions without checking, turn on **Sync automatically** for the marketplace.
+
+Your next cloud session loads it as `oracle@synced`. It also reaches your terminal sessions signed in to the same account, so you don't need to install it there separately.
+
+### Or install it from the environment's setup script
+
+To give the oracle to everyone who uses a cloud environment, such as a team's shared environment, install it from the environment instead of your account.
+
+1. At [claude.ai/code](https://claude.ai/code), open the environment selector under the message box, hover over your environment, and select its settings icon. In a running session, select the caret after the session title, then **Edit cloud environment**.
+2. Select **Setup script** and add:
+
+   ```bash
+   #!/bin/bash
+   curl -fsSL https://raw.githubusercontent.com/martinthommesen/oracle/main/scripts/install.sh | bash
+   ```
+
+3. Select **Save changes**, then start a new session.
+
+The script installs the plugin into `~/.claude/skills/oracle`, which Claude Code loads as `oracle@skills-dir`. It fetches the files from `raw.githubusercontent.com`, which the default **Trusted** network access allows; cloning the repository instead can fail, because a cloud session's GitHub proxy serves only the repositories attached to the session. To pin a version, put `ORACLE_REF=<commit or tag>` before `bash`. The environment caches what the setup script installs for about seven days, so a new version arrives when the cache is rebuilt, or right away when you edit the script. If your claude.ai account also has the plugin, the environment's copy is the one that loads.
+
+### Configure it
+
+In the same environment dialog, select **Environment variables** and set any of the [oracle's variables](#configure), one per line:
+
+```text
+ORACLE_MODEL=fable
+ORACLE_EFFORT=max
+ORACLE_EXTRA_COMMANDS=npm ls, make -n
+```
+
+New sessions use them. A session already running picks up a change the next time its VM starts, after it has been idle.
+
+To check the setup, ask Claude in a cloud session to run `claude plugin list` and look for `oracle@synced` or `oracle@skills-dir`, then run `/oracle`. As on your own machine, the configurable model, the guard, and `read_thread` need hooks modules; without them the oracle runs on its defaults, and the variables have no effect.
+
+Leave `gh pr` and `gh issue` out of `ORACLE_EXTRA_COMMANDS` in a cloud environment: they don't work there, because the session's GitHub proxy refuses the GraphQL API they use.
 
 ## How it works
 

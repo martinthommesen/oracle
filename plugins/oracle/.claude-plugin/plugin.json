@@ -2,7 +2,7 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "oracle",
   "displayName": "Oracle",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "A read-only expert advisor subagent on a stronger reasoning model, for user-requested reviews and unresolved high-impact judgment calls. Model and effort are configurable.",
   "author": {
     "name": "Martin Thommesen",
