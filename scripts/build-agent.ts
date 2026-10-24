@@ -7,10 +7,13 @@
 import { readFileSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
-import { DEFAULT_EFFORT, DEFAULT_MODEL } from '../plugins/oracle/hooks/config.ts'
-import { AGENT_NAME, FALLBACK_FEATURES, oracleDescription, oracleInstructions } from '../plugins/oracle/hooks/prompts.ts'
+import { AGENT_NAME, FALLBACK_FEATURES, oracleDescription, oracleInstructions, oracleTools } from '../plugins/oracle/hooks/prompts.ts'
 
 const target = fileURLToPath(new URL('../plugins/oracle/agents/oracle.md', import.meta.url))
+const manifest = fileURLToPath(new URL('../plugins/oracle/.claude-plugin/plugin.json', import.meta.url))
+
+// The fallback runs on the defaults the /config rows start from.
+const { userConfig } = JSON.parse(readFileSync(manifest, 'utf8')) as { userConfig: Record<string, { default: string }> }
 
 function indent(text: string): string {
   return text
@@ -27,9 +30,9 @@ const rendered = [
   `name: ${AGENT_NAME}`,
   'description: |',
   indent(oracleDescription(FALLBACK_FEATURES)),
-  `model: ${DEFAULT_MODEL}`,
-  `effort: ${DEFAULT_EFFORT}`,
-  'tools: Read, Grep, Glob, Bash, WebSearch, WebFetch',
+  `model: ${userConfig.model!.default}`,
+  `effort: ${userConfig.effort!.default}`,
+  `tools: ${oracleTools(FALLBACK_FEATURES).join(', ')}`,
   'color: purple',
   '---',
   '',

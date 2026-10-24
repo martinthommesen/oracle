@@ -12,7 +12,7 @@
     "check:agent": "node --experimental-strip-types scripts/build-agent.ts --check",
     "test": "node --experimental-strip-types --test tests/*.spec.ts",
     "typecheck": "node scripts/typecheck.mjs",
-    "validate": "claude plugin validate . && claude plugin validate plugins/oracle",
+    "validate": "claude plugin validate . && claude plugin validate plugins/oracle --strict",
     "test:plugin": "claude plugin test plugins/oracle",
     "check": "npm run check:agent && npm test && npm run typecheck"
   },

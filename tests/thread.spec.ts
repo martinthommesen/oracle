@@ -25,7 +25,7 @@ describe('renderThread', () => {
       assistant('Done.'),
     ]
     const brief = renderThread(rows)
-    assert.match(brief, /4 messages|3 messages/)
+    assert.match(brief, /3 messages, showing \[0\]–\[2\]/)
     assert.match(brief, /### \[0\] user\nFix the flaky login test/)
     assert.match(brief, /- Bash: git log -3/)
     assert.doesNotMatch(brief, /abc fix/)

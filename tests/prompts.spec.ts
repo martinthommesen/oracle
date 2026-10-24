@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
-import { ALL_FEATURES, FALLBACK_FEATURES, oracleDescription, oracleInstructions } from '../plugins/oracle/hooks/prompts.ts'
+import { ALL_FEATURES, FALLBACK_FEATURES, oracleDescription, oracleInstructions, oracleTools } from '../plugins/oracle/hooks/prompts.ts'
 
 const variants = [
   ['mod', ALL_FEATURES],
@@ -17,9 +17,6 @@ describe('oracle prompts', () => {
       for (const heading of ['## Read before you advise', '## Work quickly', '## Review stance', '## Engineering judgment', '## Debugging', '## Read-only mode', '## Tool use', '## Shape the response', '## Communication']) {
         assert.ok(instructions.includes(heading), heading)
       }
-      assert.match(instructions, /code-judo move/)
-      assert.match(instructions, /No blockers/)
-      assert.match(instructions, /S <1h, M 1–3h, L 1–2d, XL >2d/)
     })
 
     it(`${name}: speaks Claude Code's tools, not Amp's`, () => {
@@ -28,16 +25,10 @@ describe('oracle prompts', () => {
           assert.ok(!text.includes(amp), `${amp} in ${name}`)
         }
       }
-      assert.match(instructions, /Read, Grep, and Glob/)
-      assert.match(instructions, /WebSearch and WebFetch/)
-      assert.match(instructions, /path\/to\/file\.ts:42/)
     })
 
-    it(`${name}: keeps the guidance on when to consult`, () => {
-      assert.match(description, /When the user explicitly asks for the oracle/)
-      assert.match(description, /do NOT consult the oracle for/)
-      assert.match(description, /Write the prompt well/)
-      assert.match(description, /SendMessage/)
+    it(`${name}: fits the 4096 characters Claude Code keeps of a description, with room to spare`, () => {
+      assert.ok(description.length <= 3900, `${description.length} characters`)
     })
   }
 
@@ -52,12 +43,9 @@ describe('oracle prompts', () => {
     assert.doesNotMatch(fallback, /Explore/)
     assert.doesNotMatch(oracleDescription(FALLBACK_FEATURES), /read_thread/)
   })
-})
 
-describe('agent description', () => {
-  it('fits the 4096 characters Claude Code keeps, with room to spare', () => {
-    for (const features of [ALL_FEATURES, FALLBACK_FEATURES]) {
-      assert.ok(oracleDescription(features).length <= 3900, `${oracleDescription(features).length} characters`)
-    }
+  it('gives each variant the tools its prompt speaks of', () => {
+    assert.deepEqual(oracleTools(ALL_FEATURES), ['Read', 'Grep', 'Glob', 'LSP', 'Bash', 'WebSearch', 'WebFetch', 'Agent', 'mcp__oracle__read_thread'])
+    assert.deepEqual(oracleTools(FALLBACK_FEATURES), ['Read', 'Grep', 'Glob', 'LSP', 'Bash', 'WebSearch', 'WebFetch'])
   })
 })

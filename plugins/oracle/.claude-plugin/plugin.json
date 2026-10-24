@@ -30,7 +30,7 @@
     "extra_commands": {
       "type": "string",
       "title": "Extra read-only commands",
-      "description": "Comma-separated command prefixes the oracle may also run, on top of its built-in read-only set, e.g. \"make -n, bazel query\". Only add commands that cannot change anything.",
+      "description": "Comma-separated command prefixes the oracle may also run although Claude Code does not judge them read-only, e.g. \"gh pr view, gh pr diff, npm ls\". Only add commands that cannot change anything.",
       "default": ""
     }
   }

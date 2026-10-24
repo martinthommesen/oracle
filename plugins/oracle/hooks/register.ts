@@ -5,16 +5,14 @@
 // Without this module (hooks modules switched off, an older Claude Code) the
 // plugin still provides agents/oracle.md, the same prompt on fixed defaults.
 
-import type { EngineInterface, Register, Timer, ToolCallInput } from 'claude-code'
+import type { EngineInterface, Register, Timer } from 'claude-code'
 
 import { describeConfig, readConfig } from './config.ts'
-import type { OracleConfig } from './config.ts'
-import { AGENT_NAME, AGENT_TYPE, ALL_FEATURES, READ_THREAD_TOOL, oracleDescription, oracleInstructions } from './prompts.ts'
-import { ALLOWED_SUMMARY, checkShellCommand } from './readonly.ts'
+import { AGENT_NAME, AGENT_TYPE, ALL_FEATURES, READ_THREAD_NAME, READ_THREAD_TOOL, oracleDescription, oracleInstructions, oracleTools } from './prompts.ts'
+import { matchesPrefixes } from './shell.ts'
 import { renderThread } from './thread.ts'
 
-/** What the oracle may call. */
-const ORACLE_TOOLS = ['Read', 'Grep', 'Glob', 'LSP', 'Bash', 'WebSearch', 'WebFetch', 'Agent', READ_THREAD_TOOL]
+const ORACLE_TOOLS = oracleTools(ALL_FEATURES)
 
 /** What the oracle and the subagents it delegates to may call: reads, and managing their own subagents. */
 const FAMILY_TOOLS = new Set([...ORACLE_TOOLS, 'TodoWrite', 'SendMessage', 'TaskStop', 'TaskOutput'])
@@ -22,52 +20,64 @@ const FAMILY_TOOLS = new Set([...ORACLE_TOOLS, 'TodoWrite', 'SendMessage', 'Task
 /** The subagent types the oracle may delegate to: Claude Code's read-only ones. */
 const DELEGATES = new Set(['Explore', 'Plan', 'claude-code-guide'])
 
+const DELEGATION_REFUSAL = `oracle (read-only): the oracle may delegate only to ${[...DELEGATES].join(', ')} subagents.`
+
+const BASH_REFUSAL =
+  'oracle (read-only): Claude Code does not judge this command read-only, so the oracle may not run it. Use read-only inspection commands (git log, show, diff, blame, status, grep; rg, grep, find, ls, cat, head, tail, wc, sed -n) run from the working directory without cd, or Read, Grep, and Glob, and say in your answer what you could not check.'
+
 const READ_THREAD_DESCRIPTION =
   "Reads the conversation that invoked the oracle: the user's request, what was said and tried, and the tool calls made. Only the oracle subagent can call it."
 
-type Known = { type: string; parent: string | undefined }
+type Known = { isOracle: boolean; inFamily: boolean; parent: string | undefined }
 
-/** Every agent this session spawned that the module has seen, by id. A reload empties it; $.agent.list() refills it. */
+/** Every agent of the session the module has seen, classified when it started. A reload empties it; $.agent.list() refills it. */
 const agents = new Map<string, Known>()
 /** Ids $.agent.list() did not know either (a workflow's agents), so they are not looked up again. */
-const unknown = new Set<string>()
+const unlisted = new Set<string>()
+let refreshing: Promise<void> | undefined
 /** Running oracle consultations: agent id to start time. */
 const consulting = new Map<string, number>()
 let ticker: Timer | undefined
 
-async function lookUp($: EngineInterface, agentId: string): Promise<Known | undefined> {
-  const known = agents.get(agentId)
-  if (known !== undefined || unknown.has(agentId)) return known
-  for (const info of await $.agent.list()) {
-    if (!agents.has(info.id)) agents.set(info.id, { type: info.type, parent: info.parentId })
-  }
-  const found = agents.get(agentId)
-  if (found === undefined) unknown.add(agentId)
-  return found
+function remember(id: string, type: string, parent: string | undefined): void {
+  const isOracle = type === AGENT_TYPE
+  const inFamily = isOracle || (parent !== undefined && agents.get(parent)?.inFamily === true)
+  agents.set(id, { isOracle, inFamily, parent })
+  unlisted.delete(id)
 }
 
-/** Whether `agentId` is an oracle, or a subagent an oracle started (at any depth). */
-async function isInFamily($: EngineInterface, agentId: string): Promise<boolean> {
-  const seen = new Set<string>()
-  let id: string | undefined = agentId
-  while (id !== undefined && !seen.has(id)) {
-    seen.add(id)
-    const known = await lookUp($, id)
-    if (known === undefined) return false
-    if (known.type === AGENT_TYPE) return true
-    id = known.parent
-  }
-  return false
+/** Fills in the agents started before this module loaded; concurrent callers share one listing. */
+function refresh($: EngineInterface): Promise<void> {
+  refreshing ??= $.agent
+    .list()
+    .then(list => {
+      const byId = new Map(list.map(info => [info.id, info]))
+      const visit = (id: string, seen: Set<string>): void => {
+        const info = byId.get(id)
+        if (info === undefined || agents.has(id) || seen.has(id)) return
+        seen.add(id)
+        if (info.parentId !== undefined) visit(info.parentId, seen) // a parent is classified before its children
+        remember(id, info.type, info.parentId)
+      }
+      for (const info of list) visit(info.id, new Set())
+    })
+    .finally(() => {
+      refreshing = undefined
+    })
+  return refreshing
 }
 
-/** The same question from what the module already holds, with no `$` call: for failure handlers. */
-function isKnownFamily(agentId: string): boolean {
-  let known = agents.get(agentId)
-  for (let depth = 0; known !== undefined && depth < 16; depth += 1) {
-    if (known.type === AGENT_TYPE) return true
-    known = known.parent === undefined ? undefined : agents.get(known.parent)
+async function lookUp($: EngineInterface, id: string): Promise<Known | undefined> {
+  if (!agents.has(id) && !unlisted.has(id)) {
+    await refresh($)
+    if (!agents.has(id)) unlisted.add(id)
   }
-  return false
+  return agents.get(id)
+}
+
+/** Whether an agent is an oracle, or a subagent one started, from what the module holds: for failure handlers. */
+function isKnownFamily(id: string | undefined): boolean {
+  return id !== undefined && agents.get(id)?.inFamily === true
 }
 
 function bashCommand(input: unknown): string | undefined {
@@ -75,57 +85,35 @@ function bashCommand(input: unknown): string | undefined {
   return typeof input.command === 'string' ? input.command : undefined
 }
 
-/** Why the oracle's family may not make this call, or undefined when it may. */
-function refusalFor(e: ToolCallInput, config: OracleConfig): string | undefined {
-  const tool = String(e.tool)
-  if (!FAMILY_TOOLS.has(tool)) {
-    return `${tool} is not available to the oracle, which only reads. Use Read, Grep, Glob, read-only Bash, WebSearch, or WebFetch.`
-  }
-  if (e.tool === 'Bash') {
-    if (e.dangerouslyDisableSandbox === true) return 'the oracle runs commands inside the sandbox only.'
-    const verdict = checkShellCommand(e.command, config.extraCommands)
-    if (!verdict.ok) {
-      return `${verdict.reason}. The oracle only runs read-only inspection commands: ${ALLOWED_SUMMARY}. Use Read, Grep, or Glob instead, or say in your answer what you could not check.`
-    }
-  }
-  if (e.tool === 'Agent') {
-    const type = e.subagent_type ?? 'general-purpose'
-    if (!DELEGATES.has(type)) {
-      return `the oracle may delegate only to read-only subagents (${[...DELEGATES].join(', ')}), not ${type}.`
-    }
-    if (e.isolation !== undefined) return 'the oracle delegates without isolation; its subagents only read.'
-  }
-  return undefined
-}
-
-function elapsed(since: number): string {
-  const seconds = Math.round((Date.now() - since) / 1000)
+function formatDuration(ms: number): string {
+  const seconds = Math.round(ms / 1000)
   return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, '0')}s`
 }
 
-function showStatus($: EngineInterface, config: OracleConfig): void {
+/** Shows the running consultations in the status line, ticking each second while there are any. */
+function showStatus($: EngineInterface, label: string): void {
   if (consulting.size === 0) {
     $.ui.status(undefined)
     ticker?.cancel()
     ticker = undefined
     return
   }
-  const oldest = Math.min(...consulting.values())
   const who = consulting.size === 1 ? 'oracle' : `${consulting.size} oracles`
-  $.ui.status(`🔮 ${who} thinking · ${describeConfig(config)} · ${elapsed(oldest)}`)
-  ticker ??= $.clock.every(1000, () => showStatus($, config))
+  $.ui.status(`🔮 ${who} thinking · ${label} · ${formatDuration(Date.now() - Math.min(...consulting.values()))}`)
+  ticker ??= $.clock.every(1000, () => showStatus($, label))
 }
 
 export const register: Register = (on, options) => {
   const { config, warnings } = readConfig(options)
+  const label = describeConfig(config)
 
   on('session.start', async ($, e, next) => {
     const started = await next(e)
-    showStatus($, config) // a reload starts with no consultation in view
+    showStatus($, label) // a reload starts with no consultation in view
     for (const warning of warnings) $.ui.log(`oracle: ${warning}`)
-    try {
-      await $.tool.register({
-        name: 'read_thread',
+    const [tool, agent] = await Promise.allSettled([
+      $.tool.register({
+        name: READ_THREAD_NAME,
         description: READ_THREAD_DESCRIPTION,
         inputSchema: {
           type: 'object',
@@ -144,97 +132,101 @@ export const register: Register = (on, options) => {
           additionalProperties: false,
         },
         isDeferred: true,
-      })
-    } catch (error) {
-      $.ui.log(`oracle: read_thread is unavailable: ${String(error)}`)
-    }
-    try {
-      await $.agent.register({
+      }),
+      $.agent.register({
         name: AGENT_NAME,
         description: oracleDescription(ALL_FEATURES),
         prompt: oracleInstructions(ALL_FEATURES),
         tools: ORACLE_TOOLS,
         model: config.model,
         ...(config.effort === undefined ? {} : { effort: config.effort }),
-      })
-      $.ui.log(`oracle: ready on ${describeConfig(config)}`, { to: 'debug' })
-    } catch (error) {
-      $.ui.log(`oracle: could not register the oracle on ${describeConfig(config)} (${String(error)}); the plugin's default oracle stays in use`)
+      }),
+    ])
+    if (tool.status === 'rejected') $.ui.log(`oracle: read_thread is unavailable: ${String(tool.reason)}`)
+    if (agent.status === 'rejected') {
+      $.ui.log(`oracle: could not register the oracle on ${label} (${String(agent.reason)}); the plugin's default oracle stays in use`)
+    } else {
+      $.ui.log(`oracle: ready on ${label}`, { to: 'debug' })
     }
     return started
   })
 
-  // Every spawn is remembered, so a tool call can be traced to the oracle that
-  // started its agent; the oracle's own family may only start read-only agents.
-  // A new oracle always runs on the configured model: the Agent tool's own
-  // model parameter would otherwise let the calling model pick a weaker one.
+  // Every spawn is classified, so a tool call can be traced to the oracle that
+  // started its agent, and the oracle's family may only start read-only agents.
+  // A new oracle runs on its own definition's model: the Agent tool's model
+  // parameter would otherwise let the calling model pick a weaker one.
   on('agent.spawn', async ($, e, next) => {
-    if (e.parentAgentId !== undefined && e.resume === undefined && !DELEGATES.has(e.subagentType)) {
-      if (await isInFamily($, e.parentAgentId)) {
-        return { deny: `oracle (read-only): the oracle may delegate only to ${[...DELEGATES].join(', ')} subagents.` }
-      }
+    const parent = e.parentAgentId === undefined ? undefined : await lookUp($, e.parentAgentId)
+    if (parent?.inFamily === true && e.resume === undefined && !DELEGATES.has(e.subagentType)) {
+      return { deny: DELEGATION_REFUSAL }
     }
     const isNewOracle = e.subagentType === AGENT_TYPE && e.resume === undefined && e.workflow === undefined
-    const started = await next(isNewOracle ? { ...e, model: config.model === 'inherit' ? e.parentModel : config.model } : e)
+    const started = await next(isNewOracle ? { ...e, model: undefined } : e)
     if (started.agentId !== undefined) {
-      agents.set(started.agentId, { type: e.subagentType, parent: e.parentAgentId })
-      unknown.delete(started.agentId)
+      remember(started.agentId, e.subagentType, e.parentAgentId)
       if (e.subagentType === AGENT_TYPE) {
         $.ui.log(`oracle: consulting on ${started.model}`, { to: 'debug' })
         consulting.set(started.agentId, Date.now())
-        showStatus($, config)
+        showStatus($, label)
       }
     }
     return started
   }).catch(($, e, next) =>
-    next.called || e.parentAgentId === undefined || !isKnownFamily(e.parentAgentId) || DELEGATES.has(e.subagentType)
-      ? next(e)
-      : { deny: 'oracle (read-only): the delegation guard failed, so the spawn was refused.' },
+    next.called || !isKnownFamily(e.parentAgentId) || DELEGATES.has(e.subagentType) ? next(e) : { deny: DELEGATION_REFUSAL },
   )
 
   on('turn.complete', ($, e, next) => {
-    const since = e.agentId === undefined ? undefined : consulting.get(e.agentId)
-    if (e.agentId !== undefined && since !== undefined) {
-      consulting.delete(e.agentId)
-      showStatus($, config)
-      if (e.reason === 'answer') $.ui.toast(`🔮 The oracle answered after ${elapsed(since)}`)
-    }
+    if (e.agentId === undefined || !consulting.delete(e.agentId)) return next(e)
+    showStatus($, label)
+    if (e.reason === 'answer') $.ui.toast(`🔮 The oracle answered after ${formatDuration(e.durationMs)}`)
     return next(e)
   })
 
-  // The guard: the oracle and its subagents only read. Calls from the main
-  // conversation and from unrelated subagents pass through untouched.
+  // The guard, part one: the oracle and its subagents only call reading tools.
+  // Calls from the main conversation and from unrelated subagents pass through.
   on('tool.call', async ($, e, next) => {
-    if (e.agentId === undefined || !(await isInFamily($, e.agentId))) return next(e)
-    const refusal = refusalFor(e, config)
-    return refusal === undefined ? next(e) : { deny: `oracle (read-only): ${refusal}` }
+    if (e.agentId === undefined || (await lookUp($, e.agentId))?.inFamily !== true) return next(e)
+    if (!FAMILY_TOOLS.has(e.tool)) {
+      return { deny: `oracle (read-only): ${e.tool} is not available to the oracle, which only reads. Use Read, Grep, Glob, read-only Bash, WebSearch, or WebFetch.` }
+    }
+    if (e.tool === 'Bash' && e.dangerouslyDisableSandbox === true) {
+      return { deny: 'oracle (read-only): the oracle runs commands inside the sandbox only.' }
+    }
+    if (e.tool === 'Agent' && e.isolation !== undefined) {
+      return { deny: 'oracle (read-only): the oracle delegates without isolation; its subagents only read.' }
+    }
+    return next(e)
   }).catch(($, e, next) =>
-    next.called || e.agentId === undefined || !isKnownFamily(e.agentId)
-      ? next(e)
-      : { deny: 'oracle (read-only): the read-only guard failed, so the call was refused.' },
+    next.called || !isKnownFamily(e.agentId) ? next(e) : { deny: 'oracle (read-only): the read-only guard failed, so the call was refused.' },
   )
 
-  // Commands the guard has judged read-only need no prompt: they would only
-  // interrupt the person for a call that cannot change anything. Deny and ask
-  // rules, hooks, and settings that decided the verdict keep their word.
-  on('tool.check', async ($, e, next) => {
+  // The guard, part two: a Bash command runs only when Claude Code judges it
+  // read-only, or when it is one of the extra commands the user allowed. The
+  // person's own rules keep their word; the only prompts the guard answers are
+  // for read_thread and those extra commands, which the person already allowed.
+  // (Matchers name tools literally: the validator reads no imported constant.)
+  on('tool.check', { tool: ['Bash', 'mcp__oracle__read_thread'] }, async ($, e, next) => {
     const verdict = await next(e)
-    if (verdict.decision !== 'ask' || e.agentId === undefined) return verdict
-    if (verdict.rule !== undefined || verdict.hook !== undefined || verdict.plugin !== undefined || verdict.setting !== undefined) {
-      return verdict
+    if (e.agentId === undefined || verdict.decision === 'deny') return verdict
+    if ((await lookUp($, e.agentId))?.inFamily !== true) return verdict
+    const onlyPrompts =
+      verdict.decision === 'ask' && verdict.rule === undefined && verdict.hook === undefined && verdict.plugin === undefined && verdict.setting === undefined
+    if (e.tool === READ_THREAD_TOOL) {
+      return onlyPrompts ? { decision: 'allow', reason: 'oracle: reads its own conversation' } : verdict
     }
-    if (!(await isInFamily($, e.agentId))) return verdict
-    if (e.tool === READ_THREAD_TOOL) return { decision: 'allow', reason: 'oracle: reads its own conversation' }
-    const command = e.tool === 'Bash' ? bashCommand(e.input) : undefined
-    if (command !== undefined && checkShellCommand(command, config.extraCommands).ok) {
-      return { decision: 'allow', reason: 'oracle: read-only inspection command' }
+    if (e.isReadOnly === true) return verdict
+    const command = bashCommand(e.input)
+    if (command !== undefined && matchesPrefixes(command, config.extraCommands)) {
+      return onlyPrompts ? { decision: 'allow', reason: 'oracle: an extra command allowed in /config' } : verdict
     }
-    return verdict
-  })
+    return { decision: 'deny', reason: BASH_REFUSAL }
+  }).catch(($, e, next) =>
+    isKnownFamily(e.agentId) ? { decision: 'deny', reason: 'oracle (read-only): the read-only guard failed, so the call was refused.' } : next(e),
+  )
 
   on('tool.call', { tool: 'mcp__oracle__read_thread' }, async ($, e) => {
     const known = e.agentId === undefined ? undefined : await lookUp($, e.agentId)
-    if (known?.type !== AGENT_TYPE) return { deny: 'read_thread belongs to the oracle subagent; it reads the conversation that invoked it.' }
+    if (known?.isOracle !== true) return { deny: 'read_thread belongs to the oracle subagent; it reads the conversation that invoked it.' }
     const rows = known.parent === undefined ? await $.session.messages() : await $.session.messages({ agentId: known.parent })
     if ('deny' in rows) return { deny: `read_thread: ${rows.deny}` }
     return {

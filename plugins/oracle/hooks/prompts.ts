@@ -6,10 +6,11 @@
 
 export const AGENT_NAME = 'oracle'
 export const AGENT_TYPE = 'oracle:oracle'
+export const READ_THREAD_NAME = 'read_thread'
 export const READ_THREAD_TOOL = 'mcp__oracle__read_thread'
 
-export type PromptFeatures = {
-  /** Shell commands outside the read-only set are refused by the mod's guard. */
+type PromptFeatures = {
+  /** The mod's guard refuses shell commands Claude Code does not judge read-only. */
   guard: boolean
   /** The read_thread tool is available. */
   readThread: boolean
@@ -31,6 +32,21 @@ export const FALLBACK_FEATURES: PromptFeatures = {
 
 function lines(...parts: (string | false)[]): string {
   return parts.filter((part): part is string => part !== false).join('\n')
+}
+
+/** The tools the oracle has: reading tools, plus Agent and read_thread where the features say so. */
+export function oracleTools(f: PromptFeatures): string[] {
+  return [
+    'Read',
+    'Grep',
+    'Glob',
+    'LSP',
+    'Bash',
+    'WebSearch',
+    'WebFetch',
+    ...(f.delegation ? ['Agent'] : []),
+    ...(f.readThread ? [READ_THREAD_TOOL] : []),
+  ]
 }
 
 export function oracleInstructions(f: PromptFeatures): string {
@@ -60,11 +76,10 @@ export function oracleInstructions(f: PromptFeatures): string {
     `Stop when you can support the requested decision or next action. Do not keep collecting examples, alternatives, or reference implementations just to make the answer comprehensive. If an uncertainty does not affect the current decision, mention it briefly as follow-up work and finish.`,
     ``,
     f.delegation &&
-      `Delegate breadth, keep depth. Dispatch read-only \`Explore\` subagents with the Agent tool — several in one response when the questions are independent — in parallel with your own inspection instead of chasing wide questions through your own tool loop: one for cross-module questions ("every place X is derived", "does this pattern already exist"), one with web access for dependency internals and reference implementations. Tell every subagent it must not edit files. Read the decisive evidence — the diff, the core function, the contract — yourself.`,
-    f.delegation && ``,
-    f.delegation &&
-      `When you dispatch a subagent, give it one focused question and say what to return: file paths and line ranges, code snippets, call sites, or a specific fact. Ask questions that do not presuppose the answer — if you embed the conclusion you expect, you will get your own hypothesis back. Treat its report as a lead, not a conclusion: spot-check the ranges it cites before building a finding on them.`,
-    f.delegation && ``,
+      `Delegate breadth, keep depth. Dispatch read-only \`Explore\` subagents with the Agent tool — several in one response when the questions are independent — in parallel with your own inspection instead of chasing wide questions through your own tool loop: one for cross-module questions ("every place X is derived", "does this pattern already exist"), one with web access for dependency internals and reference implementations. Tell every subagent it must not edit files. Read the decisive evidence — the diff, the core function, the contract — yourself.
+
+When you dispatch a subagent, give it one focused question and say what to return: file paths and line ranges, code snippets, call sites, or a specific fact. Ask questions that do not presuppose the answer — if you embed the conclusion you expect, you will get your own hypothesis back. Treat its report as a lead, not a conclusion: spot-check the ranges it cites before building a finding on them.
+`,
     `- If the task asks about current changes, uncommitted changes, the latest change, or a review of this branch, inspect the diff first with \`git diff\` (add \`--cached\` for staged changes, or \`<base>...HEAD\` for a branch) or the narrowest relevant \`git diff -- <path>\` command. Do not read whole files first when the diff is the requested object.`,
     `- If the task asks about the last commit or recent history, start with \`git show --stat\` / \`git show\` or a narrow \`git log\` before reading files.`,
     `- Batch independent inspection: issue independent Read, Grep, Glob, and Bash calls together in one response rather than one at a time, and chain related read-only commands in one Bash call, for example \`git diff --stat && git diff -- src/foo.ts\`. Prefer one well-scoped batch over several sequential calls.`,
@@ -125,9 +140,9 @@ export function oracleInstructions(f: PromptFeatures): string {
     `Permitted: \`cat\`, \`head\`, \`tail\`, \`rg\`, \`grep\`, \`find\`, \`ls\`, \`git log\`, \`git diff\`, \`git show\`, \`git blame\`, \`git status\`, \`git grep\`, \`wc\`, \`file\`, \`tree\`, and similar inspection-only commands.`,
     ``,
     `Never run: \`rm\`, \`mv\`, \`mkdir\`, \`touch\`, \`sed -i\`, \`tee\`, redirection to files (\`>\`, \`>>\`), \`git commit\`, \`git push\`, \`git reset\`, \`git checkout\`, \`git rebase\`, \`git stash\`, package installs, builds, test runs that write artifacts, or any command that mutates files or state. If a command would require write access to succeed, do not run it — state what you needed and why.`,
-    f.guard && ``,
     f.guard &&
-      `A guard enforces this: shell commands outside a read-only allowlist, command substitution, and redirection to files are refused before they run. When a command is refused, do not try to rephrase it past the guard — use Read, Grep, or Glob instead, or state in your answer what you could not check and why.`,
+      `
+A guard enforces this: a shell command Claude Code does not judge read-only is refused before it runs. Run commands from the working directory, passing paths rather than \`cd\`-ing first. When a command is refused, do not try to rephrase it past the guard — use Read, Grep, or Glob instead, or state in your answer what you could not check and why.`,
     ``,
     `## Tool use`,
     ``,
@@ -188,9 +203,7 @@ export function oracleDescription(f: PromptFeatures): string {
     `- For a user-requested review, state the requested diff or scope and the intended behavior`,
     `- For an unsolicited consultation, state the unresolved question, what you already checked, and why the answer changes the decision`,
     `- Keep it focused on the requested review, decision, invariant, or debugging question`,
-    f.readThread
-      ? `- Include the necessary context directly in the prompt; the oracle has not seen this conversation (read_thread can show it, but do not rely on that)`
-      : `- Include the necessary context directly in the prompt; the oracle has not seen this conversation`,
+    `- Include the necessary context directly in the prompt; the oracle has not seen this conversation${f.readThread ? ' (read_thread can show it, but do not rely on that)' : ''}`,
     `- Name the most relevant files by workspace-relative path, for example src/auth/index.ts`,
     `- If asking about current changes, say so explicitly; the oracle should inspect them with git diff`,
     `- State the decision or outcome you need, the intended behavior, and the constraints or product choices already settled`,

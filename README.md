@@ -7,8 +7,8 @@ A read-only expert advisor for Claude Code. The oracle is a subagent on a strong
 It runs the prompts of Amp's Oracle, adapted to Claude Code, and you choose the model it runs on.
 
 - **Configurable model and effort**, from `/config`. The default is Opus at `xhigh` effort.
-- **Read-only, enforced**: the oracle and every subagent it delegates to are held to a read-only command allowlist, with no file-editing tools.
-- **No prompts for reads**: the oracle's validated read-only commands don't stop to ask you, while your deny and ask rules still apply.
+- **Read-only, enforced**: the oracle and every subagent it delegates to may run only the shell commands Claude Code itself judges read-only, with no file-editing tools.
+- **No surprise prompts**: read-only commands run without asking, as they do for Claude; anything else is refused rather than put to you, and your own rules always apply.
 - **Knows the conversation**: a `read_thread` tool lets it read the conversation that called it, so it can recover your original request and constraints.
 - **Follow-ups keep context**: Claude continues the same oracle with SendMessage instead of starting over.
 - **`/oracle`** to consult it yourself; a status line shows it thinking.
@@ -54,7 +54,7 @@ Run `/config` and find the Oracle rows, or run `/plugin configure oracle@oracle`
 | :-- | :-- | :-- |
 | **Oracle model** | `opus` | `opus`, `best` (Fable where your plan has it, else Opus), `fable`, `sonnet`, `haiku`, `inherit` (the main conversation's model), or any full model ID `--model` accepts: `claude-opus-5-5[1m]`, a Bedrock or Vertex model ID, a gateway's model name |
 | **Oracle effort** | `xhigh` | `xhigh`, `max`, `high`, `medium`, `low`, or `auto` (the model's own default). A model without the level you pick uses the nearest lower one |
-| **Extra read-only commands** | none | Comma-separated command prefixes the oracle may also run, such as `make -n, bazel query`. Add only commands that cannot change anything |
+| **Extra read-only commands** | none | Comma-separated command prefixes the oracle may also run although Claude Code doesn't judge them read-only, such as `gh pr view, gh pr diff, npm ls, make -n`. A command qualifies when every part of it (split at `\|`, `&&`, `;`) starts with one of them. Add only commands that cannot change anything |
 
 The same values in your user settings (`~/.claude/settings.json`):
 
@@ -68,7 +68,7 @@ The same values in your user settings (`~/.claude/settings.json`):
 }
 ```
 
-The configured model always wins: if Claude names a model when it calls the oracle, the plugin replaces it with yours. On some plans Fable bills to usage credits; see [Fable and usage credits](https://code.claude.com/docs/en/model-config#fable-and-usage-credits).
+The configured model always wins: if Claude names a model when it calls the oracle, the plugin drops it, so the oracle runs on yours. On some plans Fable bills to usage credits; see [Fable and usage credits](https://code.claude.com/docs/en/model-config#fable-and-usage-credits).
 
 ## How it works
 
@@ -78,7 +78,7 @@ The plugin is one Claude Code plugin with two layers:
 plugins/oracle/
 ├── hooks/register.ts     the mod: registers oracle:oracle on your model, guards it, serves read_thread
 ├── hooks/prompts.ts      the oracle's system prompt and "when to consult" guidance (one source)
-├── hooks/readonly.ts     the read-only judge for shell commands
+├── hooks/shell.ts        matches commands against your extra read-only commands
 ├── hooks/thread.ts       renders the calling conversation for read_thread
 ├── agents/oracle.md      the fallback oracle, generated from prompts.ts
 └── skills/oracle/        the /oracle command
@@ -90,13 +90,13 @@ plugins/oracle/
 1. **Tools.** The oracle has Read, Grep, Glob, LSP, Bash, WebSearch, WebFetch, Agent, and `read_thread`. No Edit, Write, or NotebookEdit.
 2. **The guard.** Every tool call from the oracle, and from any subagent it started at any depth, is checked before it runs:
    - only reading tools pass;
-   - Bash commands are parsed and held to an allowlist: git's read-only subcommands (`log`, `show`, `diff`, `blame`, `status`, `grep`, branch and tag listing, …), `rg`, `grep`, `find`, `ls`, `cat`, `head`, `tail`, `wc`, `sed -n`, `jq`, `gh pr view`, `gh api` GETs, `npm ls`, and similar, each with its writing flags refused (`sed -i`, `find -delete`, `sort -o`, `git -c`, `--output`, …). Command substitution, subshells, here-documents, backgrounding, and redirection into anything but `/dev/null` are refused outright;
+   - a Bash command runs only when Claude Code's own permission check judges it read-only: the same judgment that lets Claude run `git log` or `rg` without asking you. So `git diff`, `git log -p`, `rg`, `find -name`, `sed -n`, and the like run; `rm`, `git commit`, `sed -i`, `find -delete`, `curl`, `env`, and redirection into a file are refused. Commands you list as extra read-only commands also run, when nothing else is smuggled in beside them (command substitution, subshells, here-documents, backgrounding, variable assignments, or redirection into anything but `/dev/null`);
    - the oracle may delegate only to Claude Code's read-only subagent types: Explore, Plan, and claude-code-guide.
 3. **The prompt.** The oracle is told it is read-only, and why.
 
 A refused call returns its reason to the oracle, which then reads the file another way or says what it could not check. The guard is defense in depth, not a sandbox: an allowed command still does what it normally does (`git diff` runs the external diff driver your git config names, for example). For hard isolation, use Claude Code's [sandbox](https://code.claude.com/docs/en/sandboxing).
 
-**Permission prompts.** A Bash command the guard has judged read-only would only interrupt you, so when the oracle's command would otherwise prompt, the plugin approves it. It never overrides a deny rule, an ask rule, a hook's decision, or a setting such as `blockReadsOutsideWorkingDirectories`: those keep their word.
+**Permission prompts.** The guard never loosens your permissions: deny and ask rules, hooks, and settings such as `blockReadsOutsideWorkingDirectories` keep their word, so reading a file outside the project still asks you. It answers only two kinds of prompt itself, both for things you already allowed by installing or configuring the plugin: the oracle's `read_thread` calls, and your extra read-only commands.
 
 **`read_thread`.** The oracle starts with only the task Claude wrote. When that isn't enough, `read_thread` shows it the conversation that called it, newest messages first within about 60,000 characters, always with your opening request, and with paging for earlier messages. Only the oracle can call it.
 
@@ -104,7 +104,7 @@ A refused call returns its reason to the oracle, which then reads the file anoth
 
 | Amp | Claude Code |
 | :-- | :-- |
-| `shell_command` | Bash, behind the read-only guard, plus Read, Grep, and Glob |
+| `shell_command` | Bash, limited to what Claude Code judges read-only, plus Read, Grep, and Glob |
 | `Task` subagents | The Agent tool with read-only `Explore` subagents |
 | `web_search`, `read_web_page` | WebSearch, WebFetch |
 | `read_thread` with a parent thread ID | `read_thread`, which knows its caller |
@@ -117,11 +117,11 @@ A refused call returns its reason to the oracle, which then reads the file anoth
 
 ```sh
 npm ci
-npm test                 # unit tests: the shell judge, read_thread, config, prompts
+npm test                 # unit tests: extra-command matching, read_thread, config, prompts
 npm run build            # regenerate agents/oracle.md from hooks/prompts.ts
 npm run typecheck        # needs Claude Code's API declarations, see below
-claude plugin validate . && claude plugin validate plugins/oracle --strict
-claude plugin test plugins/oracle   # hook-level tests against the engine
+npm run validate         # claude plugin validate, the marketplace and the plugin
+npm run test:plugin      # hook-level tests against the engine
 claude --plugin-dir plugins/oracle  # try it in a session, reloading as you edit
 ```
 

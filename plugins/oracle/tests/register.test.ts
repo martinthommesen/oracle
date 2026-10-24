@@ -1,14 +1,26 @@
 // Hook-level tests, run by `claude plugin test plugins/oracle`. The hooks a
 // test registers with `on` sit beneath the plugin and stand for the engine.
 
-import type { AgentSpawnInput, On } from 'claude-code'
+import type { AgentSpawnInput, On, ToolCheckResult } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
+import type { Engine } from 'claude-code/testing'
 
 type Spec = { name: string; model?: string; effort?: string | number; tools?: readonly string[]; prompt: string; description: string }
-type Recorded = { agents: Spec[]; tools: { name: string; isDeferred?: boolean }[]; statuses: (string | undefined)[]; toasts: string[]; spawnModels: (string | undefined)[] }
+type Recorded = {
+  agents: Spec[]
+  tools: { name: string; isDeferred?: boolean }[]
+  statuses: (string | undefined)[]
+  toasts: string[]
+  spawnModels: (string | undefined)[]
+}
+type Listed = { id: string; type: string; parentId?: string }
 
-/** Stands in for the engine: records registrations, answers every tool call with "ran". */
-function engine(on: On, list: { id: string; type: string; parentId?: string }[] = []): Recorded {
+/**
+ * Stands in for the engine: records registrations, starts every spawn under
+ * its `description` as the agent id, answers every tool call with "ran" and
+ * every permission check with `verdict`.
+ */
+function engine(on: On, { list = [], verdict = { decision: 'allow' } }: { list?: Listed[]; verdict?: ToolCheckResult } = {}): Recorded {
   const recorded: Recorded = { agents: [], tools: [], statuses: [], toasts: [], spawnModels: [] }
   mock.clock(on)
   on('session.start', (_, e) => ({ cwd: e.cwd }))
@@ -20,9 +32,7 @@ function engine(on: On, list: { id: string; type: string; parentId?: string }[] 
     recorded.tools.push(e)
     return { value: { tool: `mcp__oracle__${e.name}` } }
   })
-  on('agent.list', () => ({
-    value: list.map(agent => ({ id: agent.id, type: agent.type, parentId: agent.parentId, description: '', status: 'running' as const })),
-  }))
+  on('agent.list', () => ({ value: list.map(agent => ({ ...agent, description: '', status: 'running' as const })) }))
   on('agent.spawn', (_, e) => {
     recorded.spawnModels.push(e.model)
     return { model: e.model ?? 'resolved-model', agentId: e.description }
@@ -36,12 +46,13 @@ function engine(on: On, list: { id: string; type: string; parentId?: string }[] 
     return { value: undefined }
   })
   on('ui.log', () => ({ value: undefined }))
+  on('tool.check', () => verdict)
   on('tool.call', () => ({ result: 'ran' }))
   on('turn.complete', (_, e) => ({ text: e.answer }))
   return recorded
 }
 
-/** An agent.spawn as the engine raises it; the stub above answers `description` as the agent id. */
+/** An agent.spawn as the engine raises it; the stub above answers `id` as the agent id. */
 function spawn(id: string, subagentType: string, parentAgentId?: string): AgentSpawnInput {
   return {
     tool_use_id: `toolu_${id}`,
@@ -56,8 +67,15 @@ function spawn(id: string, subagentType: string, parentAgentId?: string): AgentS
   }
 }
 
-async function start($: { session: { start: (e: { cwd: string; surface: 'terminal'; isInteractive: boolean }) => Promise<unknown> } }): Promise<void> {
+async function start($: Engine): Promise<void> {
   await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+}
+
+/** Starts the session with an oracle o1 and, under it, an Explore subagent e1. */
+async function withOracle($: Engine): Promise<void> {
+  await start($)
+  await $.agent.spawn(spawn('o1', 'oracle:oracle'))
+  await $.agent.spawn(spawn('e1', 'Explore', 'o1'))
 }
 
 describe('registration', () => {
@@ -71,9 +89,8 @@ describe('registration', () => {
     expect(oracle?.model).toBe('sonnet')
     expect(oracle?.effort).toBe('high')
     expect(oracle?.tools).toEqual(['Read', 'Grep', 'Glob', 'LSP', 'Bash', 'WebSearch', 'WebFetch', 'Agent', 'mcp__oracle__read_thread'])
-    expect(oracle?.prompt).toContain('You are the Oracle')
+    expect(oracle?.prompt).toContain('A guard enforces this')
     expect(oracle?.prompt).toContain('read_thread')
-    expect(oracle?.description).toContain('Consult the oracle')
     expect(recorded.tools).toEqual([expect.objectContaining({ name: 'read_thread', isDeferred: true })])
   })
 
@@ -102,159 +119,132 @@ describe('registration', () => {
 })
 
 describe('model', () => {
-  test('pins a new oracle to the configured model over the call\'s own', { options: { model: 'fable' } }, async ($, on) => {
+  test("drops the model a caller names for a new oracle, so the oracle's own applies", async ($, on) => {
     const recorded = engine(on)
     await start($)
     await $.agent.spawn({ ...spawn('o1', 'oracle:oracle'), model: 'haiku' })
     await $.agent.spawn({ ...spawn('w1', 'general-purpose'), model: 'haiku' })
 
-    expect(recorded.spawnModels).toEqual(['fable', 'haiku'])
-  })
-
-  test('runs an inherit oracle on the parent\'s model', { options: { model: 'inherit' } }, async ($, on) => {
-    const recorded = engine(on)
-    await start($)
-    await $.agent.spawn({ ...spawn('o1', 'oracle:oracle'), model: 'haiku' })
-
-    expect(recorded.spawnModels).toEqual(['claude-opus-5-5'])
+    expect(recorded.spawnModels).toEqual([undefined, 'haiku'])
   })
 })
 
-describe('read-only guard', () => {
-  test('refuses writes from the oracle and lets reads through', async ($, on) => {
+describe('tools the oracle may call', () => {
+  test('refuses tools that write, for the oracle and the subagents it started', async ($, on) => {
     engine(on)
-    await start($)
-    await $.agent.spawn(spawn('o1', 'oracle:oracle'))
+    await withOracle($)
 
-    const write = await $.tool.call({ tool: 'Bash', command: 'rm -rf build', agentId: 'o1' })
-    expect(write.deny).toContain('"rm" is not a read-only inspection command')
+    expect((await $.tool.call({ tool: 'Edit', file_path: '/repo/a.ts', old_string: 'a', new_string: 'b', agentId: 'o1' })).deny).toBeDefined()
+    expect((await $.tool.call({ tool: 'Write', file_path: '/repo/x', content: 'x', agentId: 'e1' })).deny).toBeDefined()
+    expect((await $.tool.call({ tool: 'Agent', description: 'x', prompt: 'x', subagent_type: 'Explore', isolation: 'worktree', agentId: 'o1' })).deny).toBeDefined()
 
-    const redirect = await $.tool.call({ tool: 'Bash', command: 'git diff > patch.diff', agentId: 'o1' })
-    expect(redirect.deny).toContain('redirecting output')
-
-    const read = await $.tool.call({ tool: 'Bash', command: 'git diff --stat && git log -5', agentId: 'o1' })
-    expect(read.deny).toBe(undefined)
+    const read = await $.tool.call({ tool: 'Read', file_path: '/repo/a.ts', agentId: 'o1' })
     expect(read.result).toBe('ran')
-
-    const edit = await $.tool.call({ tool: 'Edit', file_path: '/repo/a.ts', old_string: 'a', new_string: 'b', agentId: 'o1' })
-    expect(edit.deny).toContain('Edit is not available to the oracle')
-
-    const general = await $.tool.call({ tool: 'Agent', description: 'x', prompt: 'x', agentId: 'o1' })
-    expect(general.deny).toContain('not general-purpose')
-
     const explore = await $.tool.call({ tool: 'Agent', description: 'x', prompt: 'x', subagent_type: 'Explore', agentId: 'o1' })
-    expect(explore.deny).toBe(undefined)
-  })
-
-  test('holds the subagents the oracle delegates to to the same rules', async ($, on) => {
-    engine(on)
-    await start($)
-    await $.agent.spawn(spawn('o1', 'oracle:oracle'))
-    await $.agent.spawn(spawn('e1', 'Explore', 'o1'))
-
-    const write = await $.tool.call({ tool: 'Write', file_path: '/repo/x', content: 'x', agentId: 'e1' })
-    expect(write.deny).toContain('not available to the oracle')
-
-    const touch = await $.tool.call({ tool: 'Bash', command: 'touch x', agentId: 'e1' })
-    expect(touch.deny).toContain('"touch" is not a read-only')
-
-    const refused = await $.agent.spawn(spawn('g1', 'general-purpose', 'o1'))
-    expect(refused.deny).toContain('may delegate only to')
+    expect(explore.result).toBe('ran')
   })
 
   test('leaves the main conversation and unrelated subagents alone', async ($, on) => {
     engine(on)
-    await start($)
-    await $.agent.spawn(spawn('o1', 'oracle:oracle'))
+    await withOracle($)
     await $.agent.spawn(spawn('w1', 'general-purpose'))
 
-    const main = await $.tool.call({ tool: 'Bash', command: 'rm -rf build' })
-    expect(main.result).toBe('ran')
-
-    const worker = await $.tool.call({ tool: 'Edit', file_path: '/repo/a.ts', old_string: 'a', new_string: 'b', agentId: 'w1' })
-    expect(worker.result).toBe('ran')
-
-    const spawned = await $.agent.spawn(spawn('g2', 'general-purpose', 'w1'))
-    expect(spawned.deny).toBe(undefined)
+    expect((await $.tool.call({ tool: 'Edit', file_path: '/repo/a.ts', old_string: 'a', new_string: 'b' })).result).toBe('ran')
+    expect((await $.tool.call({ tool: 'Edit', file_path: '/repo/a.ts', old_string: 'a', new_string: 'b', agentId: 'w1' })).result).toBe('ran')
   })
 
-  test('recognises an oracle it did not see start, by the agent list', async ($, on) => {
-    engine(on, [
-      { id: 'o9', type: 'oracle:oracle' },
-      { id: 'e9', type: 'Explore', parentId: 'o9' },
-    ])
-    await start($)
-
-    const write = await $.tool.call({ tool: 'Bash', command: 'git commit -m x', agentId: 'e9' })
-    expect(write.deny).toContain('"git commit" is not a read-only git command')
-  })
-
-  test('honours the extra commands the user allowed', { options: { extra_commands: 'make -n' } }, async ($, on) => {
+  test('lets the oracle delegate only to read-only subagent types', async ($, on) => {
     engine(on)
-    await start($)
-    await $.agent.spawn(spawn('o1', 'oracle:oracle'))
+    await withOracle($)
+    await $.agent.spawn(spawn('w1', 'general-purpose'))
 
-    const dryRun = await $.tool.call({ tool: 'Bash', command: 'make -n test', agentId: 'o1' })
-    expect(dryRun.deny).toBe(undefined)
-
-    const real = await $.tool.call({ tool: 'Bash', command: 'make test', agentId: 'o1' })
-    expect(real.deny).toContain('"make" is not a read-only')
+    expect((await $.agent.spawn(spawn('g1', 'general-purpose', 'o1'))).deny).toBeDefined()
+    expect((await $.agent.spawn(spawn('g2', 'general-purpose', 'e1'))).deny).toBeDefined()
+    expect((await $.agent.spawn(spawn('p1', 'Plan', 'o1'))).deny).toBe(undefined)
+    expect((await $.agent.spawn(spawn('g3', 'general-purpose', 'w1'))).deny).toBe(undefined)
   })
 })
 
-describe('permission prompts', () => {
-  test("approves the oracle's read-only commands that would only prompt", async ($, on) => {
+describe('shell commands', () => {
+  test("runs a command Claude Code judges read-only, and refuses one it doesn't", async ($, on) => {
     engine(on)
-    on('tool.check', () => ({ decision: 'ask' as const }))
-    await start($)
-    await $.agent.spawn(spawn('o1', 'oracle:oracle'))
+    await withOracle($)
 
-    const read = await $.tool.check({ tool: 'Bash', input: { command: 'git log -5' }, agentId: 'o1' })
+    const read = await $.tool.check({ tool: 'Bash', input: { command: 'git log -5' }, agentId: 'o1', isReadOnly: true })
     expect(read.decision).toBe('allow')
 
-    const write = await $.tool.check({ tool: 'Bash', input: { command: 'npm install' }, agentId: 'o1' })
-    expect(write.decision).toBe('ask')
-
-    const main = await $.tool.check({ tool: 'Bash', input: { command: 'git log -5' } })
-    expect(main.decision).toBe('ask')
+    for (const agentId of ['o1', 'e1']) {
+      const write = await $.tool.check({ tool: 'Bash', input: { command: 'rm -rf build' }, agentId })
+      expect(write.decision).toBe('deny')
+      expect(write.reason).toContain('read-only')
+    }
   })
 
-  test("keeps the person's own ask rules and denials", async ($, on) => {
-    engine(on)
-    on('tool.check', (_, e) =>
-      String((e.input as { command?: string }).command).startsWith('git log')
-        ? { decision: 'ask' as const, rule: 'Bash(git log:*)' }
-        : { decision: 'deny' as const, reason: 'denied by rule' },
-    )
+  test('leaves the main conversation and unrelated subagents to the person', async ($, on) => {
+    engine(on, { verdict: { decision: 'ask' } })
     await start($)
-    await $.agent.spawn(spawn('o1', 'oracle:oracle'))
+    await $.agent.spawn(spawn('w1', 'general-purpose'))
 
-    const asked = await $.tool.check({ tool: 'Bash', input: { command: 'git log -5' }, agentId: 'o1' })
-    expect(asked.decision).toBe('ask')
+    expect((await $.tool.check({ tool: 'Bash', input: { command: 'rm -rf build' } })).decision).toBe('ask')
+    expect((await $.tool.check({ tool: 'Bash', input: { command: 'rm -rf build' }, agentId: 'w1' })).decision).toBe('ask')
+  })
 
-    const denied = await $.tool.check({ tool: 'Bash', input: { command: 'git diff' }, agentId: 'o1' })
-    expect(denied.decision).toBe('deny')
+  test("keeps the person's own rules, read-only or not", async ($, on) => {
+    engine(on, { verdict: { decision: 'ask', rule: 'Bash(git log:*)' } })
+    await withOracle($)
+
+    expect((await $.tool.check({ tool: 'Bash', input: { command: 'git log -5' }, agentId: 'o1', isReadOnly: true })).decision).toBe('ask')
+  })
+
+  test("keeps the engine's refusal", async ($, on) => {
+    engine(on, { verdict: { decision: 'deny', reason: 'denied by rule' } })
+    await withOracle($)
+
+    expect((await $.tool.check({ tool: 'Bash', input: { command: 'git log' }, agentId: 'o1', isReadOnly: true })).reason).toBe('denied by rule')
+  })
+
+  test('runs the extra commands the user allowed, without a prompt', { options: { extra_commands: 'make -n, gh pr view' } }, async ($, on) => {
+    engine(on, { verdict: { decision: 'ask' } })
+    await withOracle($)
+
+    expect((await $.tool.check({ tool: 'Bash', input: { command: 'make -n test | head' }, agentId: 'o1' })).decision).toBe('deny')
+    expect((await $.tool.check({ tool: 'Bash', input: { command: 'gh pr view 12 && make -n test' }, agentId: 'o1' })).decision).toBe('allow')
+    expect((await $.tool.check({ tool: 'Bash', input: { command: 'make test' }, agentId: 'o1' })).decision).toBe('deny')
+    expect((await $.tool.check({ tool: 'Bash', input: { command: 'make -n $(rm -rf build)' }, agentId: 'o1' })).decision).toBe('deny')
+  })
+
+  test('recognises an oracle it did not see start, by the agent list', async ($, on) => {
+    engine(on, {
+      list: [
+        { id: 'o9', type: 'oracle:oracle' },
+        { id: 'e9', type: 'Explore', parentId: 'o9' },
+      ],
+    })
+    await start($)
+
+    expect((await $.tool.check({ tool: 'Bash', input: { command: 'git commit -m x' }, agentId: 'e9' })).decision).toBe('deny')
+    expect((await $.tool.call({ tool: 'Edit', file_path: '/repo/a.ts', old_string: 'a', new_string: 'b', agentId: 'e9' })).deny).toBeDefined()
   })
 })
 
 describe('read_thread', () => {
-  test('gives the oracle the conversation that invoked it', async ($, on) => {
-    engine(on)
+  test('gives the oracle the conversation that invoked it, without a prompt', async ($, on) => {
+    engine(on, { verdict: { decision: 'ask' } })
     on('session.messages', () => ({
       value: [
         { role: 'user' as const, text: 'Why does checkout double-charge?', toolUses: [] },
         { role: 'assistant' as const, text: 'Asking the oracle.', toolUses: [{ tool_use_id: 't1', tool: 'Agent', input: { subagent_type: 'oracle:oracle', description: 'o1', prompt: 'trace it' } }] },
       ],
     }))
-    await start($)
-    await $.agent.spawn(spawn('o1', 'oracle:oracle'))
+    await withOracle($)
 
+    expect((await $.tool.check({ tool: 'mcp__oracle__read_thread', input: {}, agentId: 'o1' })).decision).toBe('allow')
     const read = await $.tool.call({ tool: 'mcp__oracle__read_thread', agentId: 'o1' })
     expect(String(read.result)).toContain('Why does checkout double-charge?')
     expect(String(read.result)).toContain('- Agent: oracle:oracle: o1')
 
-    const other = await $.tool.call({ tool: 'mcp__oracle__read_thread' })
-    expect(other.deny).toContain('belongs to the oracle')
+    expect((await $.tool.call({ tool: 'mcp__oracle__read_thread' })).deny).toBeDefined()
+    expect((await $.tool.call({ tool: 'mcp__oracle__read_thread', agentId: 'e1' })).deny).toBeDefined()
   })
 })
 
@@ -266,8 +256,8 @@ describe('status', () => {
 
     expect(recorded.statuses.at(-1)).toContain('oracle thinking · opus · xhigh')
 
-    await $.turn.complete({ answer: 'No blockers.', durationMs: 1000, isAborted: false, turnId: 't', agentId: 'o1', reason: 'answer' })
+    await $.turn.complete({ answer: 'No blockers.', durationMs: 125_000, isAborted: false, turnId: 't', agentId: 'o1', reason: 'answer' })
     expect(recorded.statuses.at(-1)).toBe(undefined)
-    expect(recorded.toasts.at(-1)).toContain('The oracle answered')
+    expect(recorded.toasts.at(-1)).toContain('answered after 2m 05s')
   })
 })

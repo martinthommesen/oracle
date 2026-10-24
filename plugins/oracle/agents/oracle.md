@@ -42,7 +42,7 @@ description: |
   A choice between two plausible designs: "I narrowed the executor-state API to two viable designs: a public discriminated union that changes the wire schema, or a compatible wire type converted to a strict internal union at ingress. Relevant files: thread-actors/src/sandbox/manager.ts, lib/thread-protocol/src/protocol.ts. Compare only these alternatives for illegal-state prevention, protocol compatibility, and migration risk. Recommend one and name the evidence that would reverse the decision."
 model: opus
 effort: xhigh
-tools: Read, Grep, Glob, Bash, WebSearch, WebFetch
+tools: Read, Grep, Glob, LSP, Bash, WebSearch, WebFetch
 color: purple
 ---
 

@@ -14,10 +14,9 @@ export type ThreadRow = {
     text?: string
     isError?: true
   }[]
-  toolResults?: readonly unknown[]
 }
 
-export type ThreadPage = {
+type ThreadPage = {
   /** Index (from 0) of the first message to show; default: the newest that fit. */
   offset?: number
   /** Most messages to show. */
@@ -26,7 +25,7 @@ export type ThreadPage = {
   includeToolOutput?: boolean
 }
 
-export const THREAD_BUDGET = 60_000
+const THREAD_BUDGET = 60_000
 const MESSAGE_LIMIT = 6_000
 const TOOL_INPUT_LIMIT = 240
 const TOOL_OUTPUT_LIMIT = 600
@@ -36,8 +35,11 @@ function clip(text: string, limit: number): string {
   return `${text.slice(0, limit)}… [${text.length - limit} more characters]`
 }
 
-function oneLine(text: string): string {
-  return text.replace(/\s+/g, ' ').trim()
+/** `text` on one line, at most `limit` characters; only the head is normalized. */
+function clipLine(text: string, limit: number): string {
+  const line = text.slice(0, limit * 2).replace(/\s+/g, ' ').trim()
+  if (line.length <= limit && text.length <= limit * 2) return line
+  return `${line.slice(0, limit)}… [${Math.max(0, text.length - limit)} more characters]`
 }
 
 /** The argument that says what a call did: the command, the path, the pattern. */
@@ -46,25 +48,27 @@ function describeInput(tool: string, input: Readonly<Record<string, unknown>>): 
     const value = input[key]
     return typeof value === 'string' ? value : undefined
   }
-  const primary =
+  const shown =
     pick('command') ??
     pick('file_path') ??
     pick('pattern') ??
     pick('url') ??
     pick('query') ??
     pick('description') ??
-    pick('prompt')
-  const shown = primary ?? JSON.stringify(input)
-  return clip(oneLine(`${tool === 'Agent' && pick('subagent_type') ? `${pick('subagent_type')}: ` : ''}${shown}`), TOOL_INPUT_LIMIT)
+    pick('prompt') ??
+    JSON.stringify(input)
+  const type = tool === 'Agent' ? pick('subagent_type') : undefined
+  return clipLine(type === undefined ? shown : `${type}: ${shown}`, TOOL_INPUT_LIMIT)
 }
 
 function renderRow(row: ThreadRow, index: number, includeToolOutput: boolean): string {
   const parts = [`### [${index}] ${row.role}`]
-  if (row.text.trim() !== '') parts.push(clip(row.text.trim(), MESSAGE_LIMIT))
+  const text = row.text.trim()
+  if (text !== '') parts.push(clip(text, MESSAGE_LIMIT))
   for (const use of row.toolUses) {
     parts.push(`- ${use.tool}: ${describeInput(use.tool, use.input)}${use.isError ? ' (error)' : ''}`)
     if (includeToolOutput && use.text !== undefined && use.text.trim() !== '') {
-      parts.push(`  → ${clip(oneLine(use.text), TOOL_OUTPUT_LIMIT)}`)
+      parts.push(`  → ${clipLine(use.text, TOOL_OUTPUT_LIMIT)}`)
     }
   }
   return parts.join('\n')
@@ -79,15 +83,24 @@ function isShown(row: ThreadRow): boolean {
  * Renders a page of the thread as Markdown, within `budget` characters.
  *
  * Without an offset it shows the newest messages that fit, plus the first
- * message when it is not among them; with one, messages from there on.
+ * message when it is not among them; with one, messages from there on. Only
+ * the messages it shows are rendered.
  */
 export function renderThread(rows: readonly ThreadRow[], page: ThreadPage = {}, budget = THREAD_BUDGET): string {
-  const shown = rows.map((row, index) => ({ row, index })).filter(({ row }) => isShown(row))
+  const shown = rows.filter(isShown)
   const total = shown.length
   if (total === 0) return 'The conversation that invoked the oracle has no messages yet.'
   const includeToolOutput = page.includeToolOutput === true
   const limit = Math.max(1, Math.min(page.limit ?? total, total))
-  const blocks = shown.map(({ row }, position) => renderRow(row, position, includeToolOutput))
+  const blocks = new Map<number, string>()
+  const block = (index: number): string => {
+    let rendered = blocks.get(index)
+    if (rendered === undefined) {
+      rendered = renderRow(shown[index]!, index, includeToolOutput)
+      blocks.set(index, rendered)
+    }
+    return rendered
+  }
 
   let first: number
   let last: number // exclusive
@@ -95,17 +108,17 @@ export function renderThread(rows: readonly ThreadRow[], page: ThreadPage = {}, 
     first = Math.min(Math.max(0, Math.floor(page.offset)), total - 1)
     last = first
     let used = 0
-    while (last < total && last - first < limit && (last === first || used + blocks[last]!.length <= budget)) {
-      used += blocks[last]!.length
+    while (last < total && last - first < limit && (last === first || used + block(last).length <= budget)) {
+      used += block(last).length
       last += 1
     }
   } else {
     last = total
     first = total
-    let used = blocks[0]!.length // room kept for the opening request
-    while (first > 0 && last - first < limit && (first === total || used + blocks[first - 1]!.length <= budget)) {
+    let used = block(0).length // room kept for the opening request
+    while (first > 0 && last - first < limit && (first === total || used + block(first - 1).length <= budget)) {
       first -= 1
-      if (first !== 0) used += blocks[first]!.length
+      if (first !== 0) used += block(first).length
     }
   }
 
@@ -116,7 +129,7 @@ export function renderThread(rows: readonly ThreadRow[], page: ThreadPage = {}, 
     includeToolOutput ? undefined : 'Tool output is omitted; pass include_tool_output: true to see it.',
   ].filter(line => line !== undefined)
 
-  const body = blocks.slice(first, last)
-  if (first > 0 && page.offset === undefined) body.unshift(blocks[0]!, `… [${first - 1} messages omitted] …`)
+  const body = Array.from({ length: last - first }, (_, k) => block(first + k))
+  if (first > 0 && page.offset === undefined) body.unshift(block(0), `… [${first - 1} messages omitted] …`)
   return [header.join('\n'), ...body].join('\n\n')
 }

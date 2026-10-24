@@ -24,22 +24,14 @@ jobs:
 
       - run: npm ci
 
-      - name: Fallback agent file matches the prompts
-        run: npm run check:agent
-
-      - name: Unit tests
-        run: npm test
-
-      - name: Type-check
-        run: npm run typecheck
+      - name: Fallback agent file, unit tests, type-check
+        run: npm run check
 
       - name: Install Claude Code
         run: npm install --global @anthropic-ai/claude-code@stable
 
       - name: Validate the marketplace and the plugin
-        run: |
-          claude plugin validate .
-          claude plugin validate plugins/oracle --strict
+        run: npm run validate
 
       - name: Hook tests
-        run: claude plugin test plugins/oracle
+        run: npm run test:plugin
