@@ -1,19 +1,17 @@
 import assert from 'node:assert/strict'
-import { readdirSync, readFileSync } from 'node:fs'
-import { join, relative } from 'node:path'
+import { execFileSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import { describe, it } from 'node:test'
 import { fileURLToPath } from 'node:url'
 
-const root = fileURLToPath(new URL('../plugins/oracle/', import.meta.url))
-
-/** The plugin's files that sessions load: everything but its tests, its tsconfig, and what Claude Code writes beside it. */
-function pluginFiles(dir = root): string[] {
-  return readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
-    const path = join(dir, entry.name)
-    const rel = relative(root, path)
-    if (rel === 'tests' || rel === 'tsconfig.json' || rel === join('.claude-plugin', 'types') || rel === '.mcpb-cache') return []
-    return entry.isDirectory() ? pluginFiles(path) : [rel.split('\\').join('/')]
-  })
+/** The plugin's committed files that sessions load, as install.sh fetches them: everything but its tests and tsconfig. */
+function pluginFiles(): string[] {
+  const listed = execFileSync('git', ['ls-files', '-z', '--', 'plugins/oracle'], { cwd: fileURLToPath(new URL('..', import.meta.url)), encoding: 'utf8' })
+  return listed
+    .split('\0')
+    .filter(Boolean)
+    .map(path => path.slice('plugins/oracle/'.length))
+    .filter(path => !path.startsWith('tests/') && path !== 'tsconfig.json')
 }
 
 describe('scripts/install.sh', () => {

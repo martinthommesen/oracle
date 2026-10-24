@@ -1,9 +1,9 @@
 // Hook-level tests, run by `claude plugin test plugins/oracle`. The hooks a
 // test registers with `on` sit beneath the plugin and stand for the engine.
 
-import type { AgentSpawnInput, AgentStatus, On, SessionMessage, ToolCheckResult } from 'claude-code'
+import type { AgentSpawnInput, On, SessionMessage, ToolCheckResult } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
-import type { Engine, MockClock } from 'claude-code/testing'
+import type { Engine } from 'claude-code/testing'
 
 type Spec = { name: string; model?: string; effort?: string | number; tools?: readonly string[]; prompt: string; description: string }
 type Recorded = {
@@ -12,9 +12,8 @@ type Recorded = {
   statuses: (string | undefined)[]
   toasts: string[]
   spawnModels: (string | undefined)[]
-  clock: MockClock
 }
-type Listed = { id: string; type: string; parentId?: string; status?: AgentStatus }
+type Listed = { id: string; type: string; parentId?: string }
 
 /**
  * Stands in for the engine: records registrations, starts every spawn under
@@ -25,7 +24,8 @@ function engine(
   on: On,
   { list = [], verdict = { decision: 'allow' }, env = {} }: { list?: Listed[]; verdict?: ToolCheckResult; env?: Record<string, string> } = {},
 ): Recorded {
-  const recorded: Recorded = { agents: [], tools: [], statuses: [], toasts: [], spawnModels: [], clock: mock.clock(on) }
+  const recorded: Recorded = { agents: [], tools: [], statuses: [], toasts: [], spawnModels: [] }
+  mock.clock(on)
   mock.env(on, env)
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('agent.register', (_, e) => {
@@ -36,7 +36,7 @@ function engine(
     recorded.tools.push(e)
     return { value: { tool: `mcp__oracle__${e.name}` } }
   })
-  on('agent.list', () => ({ value: list.map(agent => ({ description: '', status: 'running' as const, ...agent })) }))
+  on('agent.list', () => ({ value: list.map(agent => ({ ...agent, description: '', status: 'running' as const })) }))
   on('agent.spawn', (_, e) => {
     recorded.spawnModels.push(e.model)
     return { model: e.model ?? 'resolved-model', agentId: e.description }
@@ -332,19 +332,5 @@ describe('status', () => {
     await $.turn.complete({ answer: 'No blockers.', durationMs: 125_000, isAborted: false, turnId: 't', agentId: 'o1', reason: 'answer' })
     expect(recorded.statuses.at(-1)).toBe(undefined)
     expect(recorded.toasts.at(-1)).toContain('answered after 2m 05s')
-  })
-
-  test('clears a consultation whose oracle stopped without an answer', async ($, on) => {
-    const list: Listed[] = [{ id: 'o1', type: 'oracle:oracle' }]
-    const recorded = engine(on, { list })
-    await start($)
-    await $.agent.spawn(spawn('o1', 'oracle:oracle'))
-
-    await recorded.clock.advance(15_000)
-    expect(recorded.statuses.at(-1)).toContain('oracle thinking')
-
-    list[0] = { id: 'o1', type: 'oracle:oracle', status: 'killed' }
-    await recorded.clock.advance(15_000)
-    expect(recorded.statuses.at(-1)).toBe(undefined)
   })
 })

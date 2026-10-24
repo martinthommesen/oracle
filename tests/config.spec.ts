@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { describe, it } from 'node:test'
 
-import { DEFAULT_MODEL, describeConfig, readConfig } from '../plugins/oracle/hooks/config.ts'
+import { DEFAULT_MODEL, EFFORTS, describeConfig, readConfig } from '../plugins/oracle/hooks/config.ts'
 
 const manifest = JSON.parse(readFileSync(new URL('../plugins/oracle/.claude-plugin/plugin.json', import.meta.url), 'utf8'))
 
@@ -16,6 +16,10 @@ describe('readConfig', () => {
     assert.equal(DEFAULT_MODEL, manifest.userConfig.model.default)
     assert.equal(readConfig({}).config.model, DEFAULT_MODEL)
     assert.equal(readConfig({ model: '  ' }).config.model, DEFAULT_MODEL)
+  })
+
+  it('takes the effort levels the manifest offers', () => {
+    assert.deepEqual(EFFORTS, manifest.userConfig.effort.options)
   })
 
   it('takes aliases and full model IDs', () => {

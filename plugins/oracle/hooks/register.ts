@@ -42,7 +42,6 @@ let refreshing: Promise<void> | undefined
 /** Running oracle consultations: agent id to start time. */
 const consulting = new Map<string, number>()
 let ticker: Timer | undefined
-let ticks = 0
 
 function remember(id: string, type: string, parent: string | undefined): void {
   const isOracle = type === AGENT_TYPE
@@ -51,54 +50,46 @@ function remember(id: string, type: string, parent: string | undefined): void {
   unlisted.delete(id)
 }
 
-type Started = { type: string; parentId: string | undefined }
+/** The main conversation's rows (no `agentId`) or an agent's, which the engine may refuse. */
+function transcript($: EngineInterface, agentId: string | undefined) {
+  return agentId === undefined ? $.session.messages() : $.session.messages({ agentId })
+}
+
+type Start = Pick<AgentInfo, 'type' | 'parentId'>
 
 /**
  * Finds how the agents `missing` were started, from the Agent calls in the
  * session's transcripts: the main conversation's and each known agent's, a
  * found agent's own transcript included, since it may have started another.
  */
-async function findSpawns($: EngineInterface, missing: ReadonlySet<string>, known: readonly string[]): Promise<Map<string, Started>> {
-  const found = new Map<string, Started>()
-  const read = new Set<string>()
-  let pending: (string | undefined)[] = [undefined, ...known]
-  while (pending.length > 0 && found.size < missing.size) {
-    const next: string[] = []
-    for (const spawner of pending) {
-      const key = spawner ?? ''
-      if (read.has(key)) continue
-      read.add(key)
-      const rows = spawner === undefined ? await $.session.messages() : await $.session.messages({ agentId: spawner })
-      if ('deny' in rows) continue
-      for (const use of rows.flatMap(row => row.toolUses)) {
-        if (use.tool !== 'Agent' || use.agentId === undefined || !missing.has(use.agentId) || found.has(use.agentId)) continue
-        const type = typeof use.input.subagent_type === 'string' ? use.input.subagent_type : 'general-purpose'
-        found.set(use.agentId, { type, parentId: spawner })
-        next.push(use.agentId)
-      }
+async function findSpawns($: EngineInterface, missing: ReadonlySet<string>, known: readonly string[]): Promise<Map<string, Start>> {
+  const found = new Map<string, Start>()
+  const spawners: (string | undefined)[] = [undefined, ...known]
+  for (const spawner of spawners) {
+    if (found.size === missing.size) break
+    const rows = await transcript($, spawner)
+    if ('deny' in rows) continue
+    for (const use of rows.flatMap(row => row.toolUses)) {
+      if (use.tool !== 'Agent' || use.agentId === undefined || !missing.has(use.agentId) || found.has(use.agentId)) continue
+      found.set(use.agentId, { type: typeof use.input.subagent_type === 'string' ? use.input.subagent_type : 'general-purpose', parentId: spawner })
+      spawners.push(use.agentId)
     }
-    pending = next
   }
   return found
 }
 
 /** Classifies the listed agents, parents before children. */
 async function classify($: EngineInterface, list: readonly AgentInfo[]): Promise<void> {
-  const started = new Map<string, Started>(list.map(info => [info.id, { type: info.type, parentId: info.parentId }]))
+  const started = new Map<string, Start>(list.map(info => [info.id, info]))
   // A parent the list no longer holds (a finished agent) is found by the call that started it.
   const missing = new Set(list.flatMap(info => (info.parentId !== undefined && !started.has(info.parentId) && !agents.has(info.parentId) ? [info.parentId] : [])))
-  if (missing.size > 0) {
-    for (const [id, how] of await findSpawns($, missing, [...started.keys()])) started.set(id, how)
-  }
+  for (const [id, how] of await findSpawns($, missing, [...started.keys()])) started.set(id, how)
+  // Started by an agent no transcript accounts for: it may be an oracle, so its subagents stay guarded.
+  for (const id of missing) if (!started.has(id) && !agents.has(id)) agents.set(id, { isOracle: false, inFamily: true, parent: undefined })
   const visit = (id: string, seen: Set<string>): void => {
-    if (agents.has(id) || seen.has(id)) return
-    seen.add(id)
     const how = started.get(id)
-    if (how === undefined) {
-      // Started by an agent no transcript accounts for: it may be an oracle, so its subagents stay guarded.
-      agents.set(id, { isOracle: false, inFamily: true, parent: undefined })
-      return
-    }
+    if (how === undefined || agents.has(id) || seen.has(id)) return
+    seen.add(id)
     if (how.parentId !== undefined) visit(how.parentId, seen)
     remember(id, how.type, how.parentId)
   }
@@ -170,23 +161,7 @@ function showStatus($: EngineInterface, label: string): void {
   }
   const who = consulting.size === 1 ? 'oracle' : `${consulting.size} oracles`
   $.ui.status(`🔮 ${who} thinking · ${label} · ${formatDuration(Date.now() - Math.min(...consulting.values()))}`)
-  ticker ??= $.clock.every(1000, () => tick($, label))
-}
-
-/** Redraws the status each second, and every fifteenth drops consultations whose oracle no longer runs. */
-function tick($: EngineInterface, label: string): void {
-  ticks += 1
-  if (ticks % 15 === 0) void dropFinished($, label).catch(() => showStatus($, label))
-  else showStatus($, label)
-}
-
-/** A safety net for an oracle whose end no turn.complete reported. */
-async function dropFinished($: EngineInterface, label: string): Promise<void> {
-  const running = new Set(
-    (await $.agent.list()).filter(info => info.status === 'pending' || info.status === 'running' || info.status === 'waiting').map(info => info.id),
-  )
-  for (const id of consulting.keys()) if (!running.has(id)) consulting.delete(id)
-  showStatus($, label)
+  ticker ??= $.clock.every(1000, () => showStatus($, label))
 }
 
 export const register: Register = (on, options) => {
@@ -204,9 +179,6 @@ export const register: Register = (on, options) => {
     const read = readConfig(options, { model, effort, extraCommands })
     config = read.config
     label = describeConfig(config)
-    // A running ticker captured the old label: restart it on the new one.
-    ticker?.cancel()
-    ticker = undefined
     showStatus($, label) // a reload starts with no consultation in view
     for (const warning of read.warnings) $.ui.log(`oracle: ${warning}`)
     const [tool, agent] = await Promise.allSettled([
@@ -256,8 +228,9 @@ export const register: Register = (on, options) => {
   on('agent.spawn', async ($, e, next) => {
     const parent = e.parentAgentId === undefined ? undefined : await lookUp($, e.parentAgentId)
     if (parent?.inFamily === true) {
-      if (e.resume === undefined && !DELEGATES.has(e.subagentType)) return { deny: DELEGATION_REFUSAL }
-      if (e.resume !== undefined && (await lookUp($, e.resume.agentId))?.inFamily !== true) {
+      if (e.resume === undefined) {
+        if (!DELEGATES.has(e.subagentType)) return { deny: DELEGATION_REFUSAL }
+      } else if ((await lookUp($, e.resume.agentId))?.inFamily !== true) {
         return { deny: 'oracle (read-only): the oracle may resume only the subagents it started.' }
       }
     }
@@ -343,7 +316,7 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: 'mcp__oracle__read_thread' }, async ($, e) => {
     const known = e.agentId === undefined ? undefined : await lookUp($, e.agentId)
     if (known?.isOracle !== true) return { deny: 'read_thread belongs to the oracle subagent; it reads the conversation that invoked it.' }
-    const rows = known.parent === undefined ? await $.session.messages() : await $.session.messages({ agentId: known.parent })
+    const rows = await transcript($, known.parent)
     if ('deny' in rows) return { deny: `read_thread: ${rows.deny}` }
     return {
       result: renderThread(rows, {

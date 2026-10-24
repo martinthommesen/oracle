@@ -12,7 +12,6 @@ Fixes to the read-only guard:
 - A subagent whose oracle has left the agent list (after a reload) is traced through the Agent call that started it; one no transcript accounts for stays guarded.
 - An extra command split by a line continuation (`$\` then a newline, then `(`) is refused as command substitution.
 - An `ORACLE_EXTRA_COMMANDS` with no usable command keeps the `/config` ones, with a warning; an empty one clears them.
-- The status line drops a consultation whose oracle stopped without an answer, and a reload restarts it on the new configuration.
 
 ## 1.0.0
 

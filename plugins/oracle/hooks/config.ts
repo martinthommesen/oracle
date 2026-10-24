@@ -11,7 +11,8 @@ import { parseExtraPrefixes } from './shell.ts'
 /** The manifest's default model, for a field the user cleared. */
 export const DEFAULT_MODEL = 'opus'
 
-const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'auto']
+/** The effort levels, as the manifest's effort field offers them. */
+export const EFFORTS = ['xhigh', 'max', 'high', 'medium', 'low', 'auto']
 
 export type OracleConfig = {
   /** What the oracle runs on: an alias (opus, best, fable, sonnet, haiku), inherit, or a full model ID. */
