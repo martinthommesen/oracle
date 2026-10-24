@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.0
+
+- `ORACLE_MODEL`, `ORACLE_EFFORT`, and `ORACLE_EXTRA_COMMANDS` environment variables override the `/config` rows, so a Claude Code cloud environment can configure the oracle.
+- `scripts/install.sh` installs the plugin into `~/.claude/skills/oracle`, for a cloud environment's setup script.
+- The README covers giving cloud sessions the oracle, through your claude.ai account or an environment's setup script.
+
 ## 1.0.0
 
 First release.
