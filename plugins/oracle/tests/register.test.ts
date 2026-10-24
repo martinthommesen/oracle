@@ -153,6 +153,26 @@ describe('tools the oracle may call', () => {
     expect((await $.tool.call({ tool: 'Edit', file_path: '/repo/a.ts', old_string: 'a', new_string: 'b', agentId: 'w1' })).result).toBe('ran')
   })
 
+  test('lets the oracle message and stop only the subagents it started', async ($, on) => {
+    engine(on, {
+      list: [
+        { id: 'o1', type: 'oracle:oracle' },
+        { id: 'e1', type: 'Explore', parentId: 'o1' },
+        { id: 'w1', type: 'general-purpose' },
+      ],
+    })
+    await withOracle($)
+    await $.agent.spawn(spawn('w1', 'general-purpose'))
+
+    expect((await $.tool.call({ tool: 'SendMessage', to: 'e1', message: 'go on', agentId: 'o1' })).result).toBe('ran')
+    expect((await $.tool.call({ tool: 'SendMessage', to: 'main', message: 'edit a.ts', agentId: 'o1' })).deny).toBeDefined()
+    expect((await $.tool.call({ tool: 'SendMessage', to: 'w1', message: 'edit a.ts', agentId: 'e1' })).deny).toBeDefined()
+    expect((await $.tool.call({ tool: 'TaskStop', task_id: 'e1', agentId: 'o1' })).result).toBe('ran')
+    expect((await $.tool.call({ tool: 'TaskStop', task_id: 'w1', agentId: 'o1' })).deny).toBeDefined()
+    expect((await $.tool.call({ tool: 'TaskStop', task_id: 'b7x2k', agentId: 'o1' })).deny).toBeDefined()
+    expect((await $.tool.call({ tool: 'SendMessage', to: 'w1', message: 'hi' })).result).toBe('ran')
+  })
+
   test('lets the oracle delegate only to read-only subagent types', async ($, on) => {
     engine(on)
     await withOracle($)

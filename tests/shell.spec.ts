@@ -58,6 +58,7 @@ describe('parseExtraPrefixes', () => {
   it('parses a comma-separated list', () => {
     assert.deepEqual(parseExtraPrefixes(' make -n, gh pr view ,, '), [['make', '-n'], ['gh', 'pr', 'view']])
     assert.deepEqual(parseExtraPrefixes(''), [])
+    assert.deepEqual(parseExtraPrefixes(`git log --format='%h %s', make -n; rm`), [['git', 'log', '--format=%h %s']])
   })
 })
 

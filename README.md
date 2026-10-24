@@ -91,7 +91,9 @@ plugins/oracle/
 2. **The guard.** Every tool call from the oracle, and from any subagent it started at any depth, is checked before it runs:
    - only reading tools pass;
    - a Bash command runs only when Claude Code's own permission check judges it read-only: the same judgment that lets Claude run `git log` or `rg` without asking you. So `git diff`, `git log -p`, `rg`, `find -name`, `sed -n`, and the like run; `rm`, `git commit`, `sed -i`, `find -delete`, `curl`, `env`, and redirection into a file are refused. Commands you list as extra read-only commands also run, when nothing else is smuggled in beside them (command substitution, subshells, here-documents, backgrounding, variable assignments, or redirection into anything but `/dev/null`);
-   - the oracle may delegate only to Claude Code's read-only subagent types: Explore, Plan, and claude-code-guide.
+   - the oracle may delegate only to Claude Code's read-only subagent types: Explore, Plan, and claude-code-guide;
+   - SendMessage and TaskStop reach only the subagents the oracle started, so it cannot ask the main conversation or another agent to write for it;
+   - when the guard itself fails before it could tell whose call it is, the call is refused.
 3. **The prompt.** The oracle is told it is read-only, and why.
 
 A refused call returns its reason to the oracle, which then reads the file another way or says what it could not check. The guard is defense in depth, not a sandbox: an allowed command still does what it normally does (`git diff` runs the external diff driver your git config names, for example). For hard isolation, use Claude Code's [sandbox](https://code.claude.com/docs/en/sandboxing).

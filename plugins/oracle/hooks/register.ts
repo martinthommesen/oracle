@@ -14,8 +14,12 @@ import { renderThread } from './thread.ts'
 
 const ORACLE_TOOLS = oracleTools(ALL_FEATURES)
 
-/** What the oracle and the subagents it delegates to may call: reads, and managing their own subagents. */
-const FAMILY_TOOLS = new Set([...ORACLE_TOOLS, 'TodoWrite', 'SendMessage', 'TaskStop', 'TaskOutput'])
+/**
+ * What the oracle and the subagents it delegates to may call: reads, loading
+ * deferred tools, and managing their own subagents (SendMessage and TaskStop
+ * only toward the family: see the guard).
+ */
+const FAMILY_TOOLS = new Set([...ORACLE_TOOLS, 'ToolSearch', 'TodoWrite', 'SendMessage', 'TaskStop', 'TaskOutput'])
 
 /** The subagent types the oracle may delegate to: Claude Code's read-only ones. */
 const DELEGATES = new Set(['Explore', 'Plan', 'claude-code-guide'])
@@ -69,15 +73,36 @@ function refresh($: EngineInterface): Promise<void> {
 
 async function lookUp($: EngineInterface, id: string): Promise<Known | undefined> {
   if (!agents.has(id) && !unlisted.has(id)) {
+    const shared = refreshing !== undefined
     await refresh($)
+    // A listing already under way may predate this agent: ask once more before caching the miss.
+    if (!agents.has(id) && shared) await refresh($)
     if (!agents.has(id)) unlisted.add(id)
   }
   return agents.get(id)
 }
 
-/** Whether an agent is an oracle, or a subagent one started, from what the module holds: for failure handlers. */
-function isKnownFamily(id: string | undefined): boolean {
-  return id !== undefined && agents.get(id)?.inFamily === true
+/**
+ * Whether an agent may be an oracle, or a subagent one started, from what the
+ * module holds: for failure handlers. An agent not yet classified (the listing
+ * failed or overran) counts, so the guard fails closed for it.
+ */
+function mayBeFamily(id: string | undefined): boolean {
+  return id !== undefined && (agents.get(id)?.inFamily ?? !unlisted.has(id))
+}
+
+/** The ids of the session's agents that a SendMessage `to` or TaskStop `task_id` addresses, by id or name. */
+async function addressed($: EngineInterface, to: unknown): Promise<string[]> {
+  if (typeof to !== 'string') return []
+  const name = to.replace(/ \[[^\]]*\]$/, '')
+  const list = await $.agent.list()
+  return list.filter(info => info.id === to || info.name === name).map(info => info.id)
+}
+
+/** Whether every id is the oracle's family (an empty list is not). */
+async function allFamily($: EngineInterface, ids: readonly string[]): Promise<boolean> {
+  for (const id of ids) if ((await lookUp($, id))?.inFamily !== true) return false
+  return true
 }
 
 function bashCommand(input: unknown): string | undefined {
@@ -172,7 +197,7 @@ export const register: Register = (on, options) => {
     }
     return started
   }).catch(($, e, next) =>
-    next.called || !isKnownFamily(e.parentAgentId) || DELEGATES.has(e.subagentType) ? next(e) : { deny: DELEGATION_REFUSAL },
+    next.called || !mayBeFamily(e.parentAgentId) || DELEGATES.has(e.subagentType) ? next(e) : { deny: DELEGATION_REFUSAL },
   )
 
   on('turn.complete', ($, e, next) => {
@@ -195,9 +220,23 @@ export const register: Register = (on, options) => {
     if (e.tool === 'Agent' && e.isolation !== undefined) {
       return { deny: 'oracle (read-only): the oracle delegates without isolation; its subagents only read.' }
     }
+    // Messages may reach only the oracle's own subagents: the main conversation
+    // or an unrelated agent could be asked to write in its place.
+    if (e.tool === 'SendMessage') {
+      const ids = await addressed($, e.to)
+      if (ids.length === 0 || !(await allFamily($, ids))) {
+        return { deny: 'oracle (read-only): the oracle may message only the subagents it started.' }
+      }
+    }
+    if (e.tool === 'TaskStop') {
+      const ids = await addressed($, e.task_id ?? e.shell_id)
+      if (ids.length === 0 || !(await allFamily($, ids))) {
+        return { deny: 'oracle (read-only): the oracle may stop only the subagents it started.' }
+      }
+    }
     return next(e)
   }).catch(($, e, next) =>
-    next.called || !isKnownFamily(e.agentId) ? next(e) : { deny: 'oracle (read-only): the read-only guard failed, so the call was refused.' },
+    next.called || !mayBeFamily(e.agentId) ? next(e) : { deny: 'oracle (read-only): the read-only guard failed, so the call was refused.' },
   )
 
   // The guard, part two: a Bash command runs only when Claude Code judges it
@@ -221,7 +260,7 @@ export const register: Register = (on, options) => {
     }
     return { decision: 'deny', reason: BASH_REFUSAL }
   }).catch(($, e, next) =>
-    isKnownFamily(e.agentId) ? { decision: 'deny', reason: 'oracle (read-only): the read-only guard failed, so the call was refused.' } : next(e),
+    mayBeFamily(e.agentId) ? { decision: 'deny', reason: 'oracle (read-only): the read-only guard failed, so the call was refused.' } : next(e),
   )
 
   on('tool.call', { tool: 'mcp__oracle__read_thread' }, async ($, e) => {

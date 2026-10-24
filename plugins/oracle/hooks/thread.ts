@@ -19,7 +19,7 @@ export type ThreadRow = {
 type ThreadPage = {
   /** Index (from 0) of the first message to show; default: the newest that fit. */
   offset?: number
-  /** Most messages to show. */
+  /** Most messages to show, the pinned opening request included. */
   limit?: number
   /** Include what each tool call returned, shortened. */
   includeToolOutput?: boolean
@@ -39,7 +39,7 @@ function clip(text: string, limit: number): string {
 function clipLine(text: string, limit: number): string {
   const line = text.slice(0, limit * 2).replace(/\s+/g, ' ').trim()
   if (line.length <= limit && text.length <= limit * 2) return line
-  return `${line.slice(0, limit)}… [${Math.max(0, text.length - limit)} more characters]`
+  return `${line.slice(0, limit)}… [cut from ${text.length} characters]`
 }
 
 /** The argument that says what a call did: the command, the path, the pattern. */
@@ -113,13 +113,17 @@ export function renderThread(rows: readonly ThreadRow[], page: ThreadPage = {}, 
       last += 1
     }
   } else {
+    // The newest messages that fit, keeping room for the opening request, which
+    // is pinned above them and counts toward the limit (unless the limit is 1).
+    const tail = limit > 1 ? limit - 1 : 1
     last = total
     first = total
-    let used = block(0).length // room kept for the opening request
-    while (first > 0 && last - first < limit && (first === total || used + block(first - 1).length <= budget)) {
+    let used = block(0).length
+    while (first > 0 && last - first < tail && (first === total || used + block(first - 1).length <= budget)) {
       first -= 1
       if (first !== 0) used += block(first).length
     }
+    if (first === 1 && limit > 1) first = 0 // the opening request is shown anyway: nothing lies between
   }
 
   const header = [
@@ -130,6 +134,6 @@ export function renderThread(rows: readonly ThreadRow[], page: ThreadPage = {}, 
   ].filter(line => line !== undefined)
 
   const body = Array.from({ length: last - first }, (_, k) => block(first + k))
-  if (first > 0 && page.offset === undefined) body.unshift(block(0), `… [${first - 1} messages omitted] …`)
+  if (first > 0 && page.offset === undefined && limit > 1) body.unshift(block(0), `… [${first - 1} messages omitted] …`)
   return [header.join('\n'), ...body].join('\n\n')
 }

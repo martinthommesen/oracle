@@ -50,6 +50,13 @@ describe('renderThread', () => {
     assert.match(rendered, /Earlier messages: call read_thread with an offset below \d+/)
   })
 
+  it('reports no earlier messages when everything fits but the opening request', () => {
+    const rows = Array.from({ length: 4 }, (_, k) => user(`m${k} ${'x'.repeat(90)}`))
+    const rendered = renderThread(rows, {}, 450)
+    assert.match(rendered, /showing \[0\]–\[3\]/)
+    assert.doesNotMatch(rendered, /Earlier messages|messages omitted/)
+  })
+
   it('pages from an offset', () => {
     const rows = Array.from({ length: 10 }, (_, k) => user(`message ${k}`))
     const rendered = renderThread(rows, { offset: 3, limit: 2 })
@@ -74,5 +81,28 @@ describe('renderThread', () => {
   it('names the subagent type of an Agent call', () => {
     const rendered = renderThread([assistant('', [{ tool: 'Agent', input: { subagent_type: 'Explore', description: 'find callers' } }])])
     assert.match(rendered, /- Agent: Explore: find callers/)
+  })
+})
+
+describe('renderThread limits', () => {
+  const rows = Array.from({ length: 10 }, (_, k) => user(`message ${k}`))
+
+  it('counts the pinned opening request toward the limit', () => {
+    const rendered = renderThread(rows, { limit: 3 })
+    assert.match(rendered, /showing \[8\]–\[9\]/)
+    assert.equal(rendered.match(/^### \[/gm)?.length, 3)
+    assert.match(rendered, /### \[0\] user/)
+  })
+
+  it('shows only the newest message for a limit of 1', () => {
+    const rendered = renderThread(rows, { limit: 1 })
+    assert.equal(rendered.match(/^### \[/gm)?.length, 1)
+    assert.match(rendered, /### \[9\] user/)
+  })
+
+  it('reports the length a shortened tool output was cut from', () => {
+    const output = `${'a '.repeat(400)}${' '.repeat(2000)}end`
+    const rendered = renderThread([assistant('', [{ tool: 'Bash', input: { command: 'x' }, text: output }])], { includeToolOutput: true })
+    assert.match(rendered, new RegExp(`cut from ${output.length} characters`))
   })
 })

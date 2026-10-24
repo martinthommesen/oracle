@@ -181,12 +181,21 @@ export function splitCommand(src: string): string[][] {
   return commands
 }
 
-/** Parses comma-separated command prefixes, such as "make -n, gh pr view". */
+/**
+ * Parses comma-separated command prefixes, such as "make -n, gh pr view", into
+ * words the way commands are split, so a quoted prefix matches as bash reads it.
+ * An entry that is not one simple command is dropped.
+ */
 export function parseExtraPrefixes(value: string): string[][] {
-  return value
-    .split(',')
-    .map(entry => entry.trim().split(/\s+/).filter(Boolean))
-    .filter(prefix => prefix.length > 0)
+  return value.split(',').flatMap(entry => {
+    try {
+      const commands = splitCommand(entry)
+      return commands.length === 1 ? commands : []
+    } catch (error) {
+      if (error instanceof Refusal) return []
+      throw error
+    }
+  })
 }
 
 /**
