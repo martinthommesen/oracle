@@ -129,13 +129,22 @@ function showStatus($: EngineInterface, label: string): void {
 }
 
 export const register: Register = (on, options) => {
-  const { config, warnings } = readConfig(options)
-  const label = describeConfig(config)
+  // Settled at session start, where the environment can be read; nothing below runs before it.
+  let config = readConfig(options).config
+  let label = describeConfig(config)
 
   on('session.start', async ($, e, next) => {
     const started = await next(e)
+    const [model, effort, extraCommands] = await Promise.all([
+      $.env.get('ORACLE_MODEL'),
+      $.env.get('ORACLE_EFFORT'),
+      $.env.get('ORACLE_EXTRA_COMMANDS'),
+    ])
+    const read = readConfig(options, { model, effort, extraCommands })
+    config = read.config
+    label = describeConfig(config)
     showStatus($, label) // a reload starts with no consultation in view
-    for (const warning of warnings) $.ui.log(`oracle: ${warning}`)
+    for (const warning of read.warnings) $.ui.log(`oracle: ${warning}`)
     const [tool, agent] = await Promise.allSettled([
       $.tool.register({
         name: READ_THREAD_NAME,

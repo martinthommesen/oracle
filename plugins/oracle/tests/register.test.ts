@@ -20,9 +20,13 @@ type Listed = { id: string; type: string; parentId?: string }
  * its `description` as the agent id, answers every tool call with "ran" and
  * every permission check with `verdict`.
  */
-function engine(on: On, { list = [], verdict = { decision: 'allow' } }: { list?: Listed[]; verdict?: ToolCheckResult } = {}): Recorded {
+function engine(
+  on: On,
+  { list = [], verdict = { decision: 'allow' }, env = {} }: { list?: Listed[]; verdict?: ToolCheckResult; env?: Record<string, string> } = {},
+): Recorded {
   const recorded: Recorded = { agents: [], tools: [], statuses: [], toasts: [], spawnModels: [] }
   mock.clock(on)
+  mock.env(on, env)
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('agent.register', (_, e) => {
     recorded.agents.push(e)
@@ -108,6 +112,17 @@ describe('registration', () => {
 
     expect(recorded.agents[0]?.model).toBe('claude-opus-5-5[1m]')
     expect(recorded.agents[0]?.effort).toBe(undefined)
+  })
+
+  test('environment variables override the /config rows', { options: { model: 'sonnet', effort: 'high' } }, async ($, on) => {
+    const recorded = engine(on, { env: { ORACLE_MODEL: 'fable', ORACLE_EFFORT: 'max', ORACLE_EXTRA_COMMANDS: 'make -n' } })
+    await start($)
+
+    expect(recorded.agents[0]?.model).toBe('fable')
+    expect(recorded.agents[0]?.effort).toBe('max')
+    await $.agent.spawn(spawn('o1', 'oracle:oracle'))
+    expect((await $.tool.check({ tool: 'Bash', input: { command: 'make -n test' }, agentId: 'o1' })).decision).toBe('allow')
+    expect(recorded.statuses.at(-1)).toContain('fable · max')
   })
 
   test('an unusable model name falls back to opus', { options: { model: 'not a model' } }, async ($, on) => {

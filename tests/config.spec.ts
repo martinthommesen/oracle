@@ -40,6 +40,24 @@ describe('readConfig', () => {
     assert.deepEqual(readConfig({ extra_commands: 'make -n, gh pr view' }).config.extraCommands, [['make', '-n'], ['gh', 'pr', 'view']])
   })
 
+  it('lets environment variables override the options', () => {
+    const options = { model: 'opus', effort: 'xhigh', extra_commands: 'make -n' }
+    assert.deepEqual(readConfig(options, { model: 'fable', effort: 'MAX', extraCommands: 'gh pr view' }), {
+      config: { model: 'fable', effort: 'max', extraCommands: [['gh', 'pr', 'view']] },
+      warnings: [],
+    })
+    assert.equal(readConfig(options, { effort: 'auto' }).config.effort, undefined)
+    assert.deepEqual(readConfig(options, { extraCommands: '' }).config.extraCommands, [])
+    assert.deepEqual(readConfig(options, { model: '', effort: '' }).config, { model: 'opus', effort: 'xhigh', extraCommands: [['make', '-n']] })
+  })
+
+  it('keeps the option and warns about an unusable variable', () => {
+    const { config, warnings } = readConfig({ model: 'sonnet', effort: 'high' }, { model: 'two words', effort: 'ultra' })
+    assert.equal(config.model, 'sonnet')
+    assert.equal(config.effort, 'high')
+    assert.equal(warnings.length, 2)
+  })
+
   it('describes itself for the status line', () => {
     assert.equal(describeConfig(readConfig({ model: 'opus', effort: 'xhigh' }).config), 'opus · xhigh')
     assert.equal(describeConfig(readConfig({ model: 'fable', effort: 'auto' }).config), 'fable')
