@@ -1,0 +1,23 @@
+{
+  "name": "oracle-claude-code",
+  "private": true,
+  "description": "Development tooling for the oracle Claude Code plugin",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "build": "node --experimental-strip-types scripts/build-agent.ts",
+    "check:agent": "node --experimental-strip-types scripts/build-agent.ts --check",
+    "test": "node --experimental-strip-types --test tests/*.spec.ts",
+    "typecheck": "node scripts/typecheck.mjs",
+    "validate": "claude plugin validate . && claude plugin validate plugins/oracle --strict",
+    "test:plugin": "claude plugin test plugins/oracle",
+    "check": "npm run check:agent && npm test && npm run typecheck"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}
